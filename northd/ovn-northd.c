@@ -10018,6 +10018,7 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
 
     /* Logical router ingress table ND_RA_OPTIONS & ND_RA_RESPONSE: IPv6 Router
      * Adv (RA) options and response. */
+    struct smap options = SMAP_INITIALIZER(&options);
     HMAP_FOR_EACH (op, key_node, ports) {
         if (!op->nbrp || op->nbrp->peer || !op->peer) {
             continue;
@@ -10027,7 +10028,6 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
             continue;
         }
 
-        struct smap options;
         smap_clone(&options, &op->sb->options);
 
         /* enable IPv6 prefix delegation */
@@ -10049,7 +10049,7 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                  ipv6_prefix ? "true" : "false");
         sbrec_port_binding_set_options(op->sb, &options);
 
-        smap_destroy(&options);
+        smap_clear(&options);
 
         const char *address_mode = smap_get(
             &op->nbrp->ipv6_ra_configs, "address_mode");
@@ -10135,6 +10135,7 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
                                     &op->nbrp->header_);
         }
     }
+    smap_destroy(&options);
 
     /* Logical router ingress table ND_RA_OPTIONS & ND_RA_RESPONSE: RS
      * responder, by default goto next. (priority 0)*/
@@ -10995,6 +10996,7 @@ build_lflows(struct northd_context *ctx, struct hmap *datapaths,
         }
     }
     struct ovn_lflow *lflow, *next_lflow;
+    struct smap ids = SMAP_INITIALIZER(&ids);
     HMAP_FOR_EACH_SAFE (lflow, next_lflow, hmap_node, &lflows) {
         const char *pipeline = ovn_stage_get_pipeline_name(lflow->stage);
         uint8_t table = ovn_stage_get_table(lflow->stage);
@@ -11019,17 +11021,17 @@ build_lflows(struct northd_context *ctx, struct hmap *datapaths,
 #endif
         const char *where = slash ? slash + 1 : lflow->where;
 
-        struct smap ids = SMAP_INITIALIZER(&ids);
         smap_add(&ids, "stage-name", ovn_stage_to_str(lflow->stage));
         smap_add(&ids, "source", where);
         if (lflow->stage_hint) {
             smap_add(&ids, "stage-hint", lflow->stage_hint);
         }
         sbrec_logical_flow_set_external_ids(sbflow, &ids);
-        smap_destroy(&ids);
+        smap_clear(&ids);
 
         ovn_lflow_destroy(&lflows, lflow);
     }
+    smap_destroy(&ids);
     hmap_destroy(&lflows);
 
     /* Push changes to the Multicast_Group table to database. */
@@ -11435,6 +11437,7 @@ sync_dns_entries(struct northd_context *ctx, struct hmap *datapaths)
     }
 
     struct dns_info *dns_info;
+    struct smap lower_records = SMAP_INITIALIZER(&lower_records);
     HMAP_FOR_EACH_POP (dns_info, hmap_node, &dns_map) {
         if (!dns_info->sb_dns) {
             sbrec_dns = sbrec_dns_insert(ctx->ovnsb_txn);
@@ -11458,7 +11461,6 @@ sync_dns_entries(struct northd_context *ctx, struct hmap *datapaths)
         /* DNS lookups are case-insensitive. Convert records to lowercase so
          * we can do consistent lookups when DNS requests arrive
          */
-        struct smap lower_records = SMAP_INITIALIZER(&lower_records);
         struct smap_node *node;
         SMAP_FOR_EACH (node, &dns_info->nb_dns->records) {
             smap_add_nocopy(&lower_records, xstrdup(node->key),
@@ -11466,11 +11468,12 @@ sync_dns_entries(struct northd_context *ctx, struct hmap *datapaths)
         }
 
         sbrec_dns_set_records(dns_info->sb_dns, &lower_records);
+        smap_clear(&lower_records);
 
-        smap_destroy(&lower_records);
         free(dns_info->sbs);
         free(dns_info);
     }
+    smap_destroy(&lower_records);
     hmap_destroy(&dns_map);
 }
 
