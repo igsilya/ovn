@@ -27,7 +27,7 @@ availability-zone az3
 ])
 
 OVN_CLEANUP_IC([az1], [az2])
-
+AT_CHECK([exit 1])
 AT_CLEANUP
 
 AT_SETUP([ovn-ic -- transit switch handling])
