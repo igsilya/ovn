@@ -1,6 +1,5 @@
 #!/bin/bash
 
-set -o errexit
 set -x
 
 CFLAGS="-Werror"
@@ -40,6 +39,19 @@ if [ "$TESTSUITE" ]; then
     # 'distcheck' will reconfigure with required options.
     # Now we only need to prepare the Makefile without sparse-wrapped CC.
     configure_ovn
+    make -j8
+
+    c=1
+    while true; do
+        echo "============================================================="
+        echo "Iteration #$c"
+        echo "============================================================="
+        let c=$c+1
+        if ! make check -j4 TESTSUITEFLAGS="245"; then
+            cat ./tests/testsuite.dir/245/testsuite.log
+            exit 1
+        fi
+    done
 
     export DISTCHECK_CONFIGURE_FLAGS="$OPTS --with-ovs-source=$PWD/ovs_src"
     if ! make distcheck -j4 TESTSUITEFLAGS="-j4" RECHECK=yes; then
