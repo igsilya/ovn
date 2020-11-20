@@ -100,6 +100,7 @@ main(int argc, char *argv[])
     struct shash local_options;
     unsigned int seqno;
     size_t n_commands;
+    char **argve;
 
     ovn_set_program_name(argv[0]);
     fatal_ignore_sigpipe();
@@ -109,13 +110,13 @@ main(int argc, char *argv[])
     sbctl_cmd_init();
 
     /* Check if options are set via env var. */
-    argv = ovs_cmdl_env_parse_all(&argc, argv, getenv("OVN_SBCTL_OPTIONS"));
+    argve = ovs_cmdl_env_parse_all(&argc, argv, getenv("OVN_SBCTL_OPTIONS"));
 
     /* Parse command line. */
-    char *args = process_escape_args(argv);
+    char *args = process_escape_args(argve);
     shash_init(&local_options);
-    parse_options(argc, argv, &local_options);
-    char *error = ctl_parse_commands(argc - optind, argv + optind,
+    parse_options(argc, argve, &local_options);
+    char *error = ctl_parse_commands(argc - optind, argve + optind,
                                      &local_options, &commands, &n_commands);
     if (error) {
         ctl_fatal("%s", error);
@@ -150,6 +151,10 @@ main(int argc, char *argv[])
             seqno = ovsdb_idl_get_seqno(idl);
             if (do_sbctl(args, commands, n_commands, idl)) {
                 free(args);
+                for (int i = 0; i < argc; i++) {
+                    free(argve[i]);
+                }
+                free(argve);
                 exit(EXIT_SUCCESS);
             }
         }
