@@ -46,7 +46,7 @@ VLOG_DEFINE_THIS_MODULE(actions);
 /* Prototypes for functions to be defined by each action. */
 #define OVNACT(ENUM, STRUCT)                                        \
     static void format_##ENUM(const struct STRUCT *, struct ds *);  \
-    static void encode_##ENUM(const struct STRUCT *,                \
+    static bool encode_##ENUM(const struct STRUCT *,                \
                               const struct ovnact_encode_params *,  \
                               struct ofpbuf *ofpacts);              \
     static void STRUCT##_free(struct STRUCT *a);
@@ -276,12 +276,13 @@ emit_resubmit(struct ofpbuf *ofpacts, uint8_t ptable)
     resubmit->table_id = ptable;
 }
 
-static void
+static bool
 encode_OUTPUT(const struct ovnact_null *a OVS_UNUSED,
               const struct ovnact_encode_params *ep,
               struct ofpbuf *ofpacts)
 {
     emit_resubmit(ofpacts, ep->output_ptable);
+    return true;
 }
 
 static void
@@ -358,12 +359,13 @@ format_NEXT(const struct ovnact_next *next, struct ds *s)
     }
 }
 
-static void
+static bool
 encode_NEXT(const struct ovnact_next *next,
             const struct ovnact_encode_params *ep,
             struct ofpbuf *ofpacts)
 {
     emit_resubmit(ofpacts, first_ptable(ep, next->pipeline) + next->ltable);
+    return true;
 }
 
 static void
@@ -412,7 +414,7 @@ format_LOAD(const struct ovnact_load *load, struct ds *s)
     ds_put_char(s, ';');
 }
 
-static void
+static bool
 encode_LOAD(const struct ovnact_load *load,
             const struct ovnact_encode_params *ep,
             struct ofpbuf *ofpacts)
@@ -437,13 +439,16 @@ encode_LOAD(const struct ovnact_load *load,
     } else {
         uint32_t port;
         if (!ep->lookup_port(ep->aux, load->imm.string, &port)) {
-            port = 0;
+            VLOG_DBG("Port lookup failed for '%s' in %s.",
+                      load->imm.string, __func__);
+            return false;
         }
         bitwise_put(port, sf->value,
                     sf->field->n_bytes, 0, sf->field->n_bits);
         bitwise_one(ofpact_set_field_mask(sf), sf->field->n_bytes, 0,
                     sf->field->n_bits);
     }
+    return true;
 }
 
 static void
@@ -541,7 +546,7 @@ parse_assignment_action(struct action_context *ctx, bool exchange,
     move->rhs = rhs;
 }
 
-static void
+static bool
 encode_MOVE(const struct ovnact_move *move,
             const struct ovnact_encode_params *ep OVS_UNUSED,
             struct ofpbuf *ofpacts)
@@ -549,9 +554,10 @@ encode_MOVE(const struct ovnact_move *move,
     struct ofpact_reg_move *orm = ofpact_put_REG_MOVE(ofpacts);
     orm->src = expr_resolve_field(&move->rhs);
     orm->dst = expr_resolve_field(&move->lhs);
+    return true;
 }
 
-static void
+static bool
 encode_EXCHANGE(const struct ovnact_move *xchg,
                 const struct ovnact_encode_params *ep OVS_UNUSED,
                 struct ofpbuf *ofpacts)
@@ -560,6 +566,7 @@ encode_EXCHANGE(const struct ovnact_move *xchg,
     ofpact_put_STACK_PUSH(ofpacts)->subfield = expr_resolve_field(&xchg->lhs);
     ofpact_put_STACK_POP(ofpacts)->subfield = expr_resolve_field(&xchg->rhs);
     ofpact_put_STACK_POP(ofpacts)->subfield = expr_resolve_field(&xchg->lhs);
+    return true;
 }
 
 static void
@@ -581,12 +588,13 @@ format_DEC_TTL(const struct ovnact_null *null OVS_UNUSED, struct ds *s)
     ds_put_cstr(s, "ip.ttl--;");
 }
 
-static void
+static bool
 encode_DEC_TTL(const struct ovnact_null *null OVS_UNUSED,
                const struct ovnact_encode_params *ep OVS_UNUSED,
                struct ofpbuf *ofpacts)
 {
     ofpact_put_DEC_TTL(ofpacts);
+    return true;
 }
 
 static void
@@ -608,7 +616,7 @@ format_CT_NEXT(const struct ovnact_ct_next *ct_next OVS_UNUSED, struct ds *s)
     ds_put_cstr(s, "ct_next;");
 }
 
-static void
+static bool
 encode_CT_NEXT(const struct ovnact_ct_next *ct_next,
                 const struct ovnact_encode_params *ep,
                 struct ofpbuf *ofpacts)
@@ -620,6 +628,7 @@ encode_CT_NEXT(const struct ovnact_ct_next *ct_next,
     ct->zone_src.ofs = 0;
     ct->zone_src.n_bits = 16;
     ofpact_finish(ofpacts, &ct->ofpact);
+    return true;
 }
 
 static void
@@ -653,7 +662,7 @@ format_CT_COMMIT(const struct ovnact_nest *on, struct ds *s)
     }
 }
 
-static void
+static bool
 encode_CT_COMMIT(const struct ovnact_nest *on,
                  const struct ovnact_encode_params *ep OVS_UNUSED,
                  struct ofpbuf *ofpacts)
@@ -674,6 +683,7 @@ encode_CT_COMMIT(const struct ovnact_nest *on,
     ofpacts->header = ofpbuf_push_uninit(ofpacts, set_field_offset);
     ct = ofpacts->header;
     ofpact_finish(ofpacts, &ct->ofpact);
+    return true;
 }
 
 static void
@@ -856,20 +866,22 @@ encode_ct_nat(const struct ovnact_ct_nat *cn,
     ofpbuf_push_uninit(ofpacts, ct_offset);
 }
 
-static void
+static bool
 encode_CT_DNAT(const struct ovnact_ct_nat *cn,
                const struct ovnact_encode_params *ep,
                struct ofpbuf *ofpacts)
 {
     encode_ct_nat(cn, ep, false, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_CT_SNAT(const struct ovnact_ct_nat *cn,
                const struct ovnact_encode_params *ep,
                struct ofpbuf *ofpacts)
 {
     encode_ct_nat(cn, ep, true, ofpacts);
+    return true;
 }
 
 static void
@@ -1029,7 +1041,7 @@ format_CT_LB(const struct ovnact_ct_lb *cl, struct ds *s)
     ds_put_char(s, ';');
 }
 
-static void
+static bool
 encode_CT_LB(const struct ovnact_ct_lb *cl,
              const struct ovnact_encode_params *ep,
              struct ofpbuf *ofpacts)
@@ -1063,7 +1075,7 @@ encode_CT_LB(const struct ovnact_ct_lb *cl,
         ct = ofpacts->header;
         ofpact_finish(ofpacts, &ct->ofpact);
         ofpbuf_push_uninit(ofpacts, ct_offset);
-        return;
+        return true;
     }
 
     uint32_t table_id = 0;
@@ -1107,12 +1119,14 @@ encode_CT_LB(const struct ovnact_ct_lb *cl,
                                           ep->lflow_uuid);
     ds_destroy(&ds);
     if (table_id == EXT_TABLE_ID_INVALID) {
-        return;
+        VLOG_DBG("EXT_TABLE_ID_INVALID in %s.", __func__);
+        return false;
     }
 
     /* Create an action to set the group. */
     og = ofpact_put_GROUP(ofpacts);
     og->group_id = table_id;
+    return true;
 }
 
 static void
@@ -1219,7 +1233,7 @@ format_SELECT(const struct ovnact_select *select, struct ds *s)
     ds_put_char(s, ';');
 }
 
-static void
+static bool
 encode_SELECT(const struct ovnact_select *select,
              const struct ovnact_encode_params *ep,
              struct ofpbuf *ofpacts)
@@ -1247,12 +1261,14 @@ encode_SELECT(const struct ovnact_select *select,
                                           ep->lflow_uuid);
     ds_destroy(&ds);
     if (table_id == EXT_TABLE_ID_INVALID) {
-        return;
+        VLOG_DBG("EXT_TABLE_ID_INVALID in %s.", __func__);
+        return false;
     }
 
     /* Create an action to set the group. */
     og = ofpact_put_GROUP(ofpacts);
     og->group_id = table_id;
+    return true;
 }
 
 static void
@@ -1267,12 +1283,13 @@ format_CT_CLEAR(const struct ovnact_null *null OVS_UNUSED, struct ds *s)
     ds_put_cstr(s, "ct_clear;");
 }
 
-static void
+static bool
 encode_CT_CLEAR(const struct ovnact_null *null OVS_UNUSED,
                 const struct ovnact_encode_params *ep OVS_UNUSED,
                 struct ofpbuf *ofpacts)
 {
     ofpact_put_CT_CLEAR(ofpacts);
+    return true;
 }
 
 /* Implements the "arp", "nd_na", and "clone" actions, which execute nested
@@ -1517,95 +1534,106 @@ encode_nested_actions(const struct ovnact_nest *on,
     ofpbuf_uninit(&inner_ofpacts);
 }
 
-static void
+static bool
 encode_ARP(const struct ovnact_nest *on,
            const struct ovnact_encode_params *ep,
            struct ofpbuf *ofpacts)
 {
     encode_nested_actions(on, ep, ACTION_OPCODE_ARP, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_ICMP4(const struct ovnact_nest *on,
              const struct ovnact_encode_params *ep,
              struct ofpbuf *ofpacts)
 {
     encode_nested_actions(on, ep, ACTION_OPCODE_ICMP, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_ICMP4_ERROR(const struct ovnact_nest *on,
                    const struct ovnact_encode_params *ep,
                    struct ofpbuf *ofpacts)
 {
     encode_nested_actions(on, ep, ACTION_OPCODE_ICMP4_ERROR, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_ICMP6(const struct ovnact_nest *on,
              const struct ovnact_encode_params *ep,
              struct ofpbuf *ofpacts)
 {
     encode_nested_actions(on, ep, ACTION_OPCODE_ICMP, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_ICMP6_ERROR(const struct ovnact_nest *on,
                    const struct ovnact_encode_params *ep,
                    struct ofpbuf *ofpacts)
 {
     encode_nested_actions(on, ep, ACTION_OPCODE_ICMP6_ERROR, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_IGMP(const struct ovnact_null *a OVS_UNUSED,
             const struct ovnact_encode_params *ep OVS_UNUSED,
             struct ofpbuf *ofpacts)
 {
     encode_controller_op(ACTION_OPCODE_IGMP, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_TCP_RESET(const struct ovnact_nest *on,
                  const struct ovnact_encode_params *ep,
                  struct ofpbuf *ofpacts)
 {
     encode_nested_actions(on, ep, ACTION_OPCODE_TCP_RESET, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_REJECT(const struct ovnact_nest *on,
               const struct ovnact_encode_params *ep,
               struct ofpbuf *ofpacts)
 {
     encode_nested_actions(on, ep, ACTION_OPCODE_REJECT, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_ND_NA(const struct ovnact_nest *on,
              const struct ovnact_encode_params *ep,
              struct ofpbuf *ofpacts)
 {
     encode_nested_actions(on, ep, ACTION_OPCODE_ND_NA, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_ND_NA_ROUTER(const struct ovnact_nest *on,
              const struct ovnact_encode_params *ep,
              struct ofpbuf *ofpacts)
 {
     encode_nested_actions(on, ep, ACTION_OPCODE_ND_NA_ROUTER, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_ND_NS(const struct ovnact_nest *on,
              const struct ovnact_encode_params *ep,
              struct ofpbuf *ofpacts)
 {
     encode_nested_actions(on, ep, ACTION_OPCODE_ND_NS, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_CLONE(const struct ovnact_nest *on,
              const struct ovnact_encode_params *ep,
              struct ofpbuf *ofpacts)
@@ -1617,6 +1645,7 @@ encode_CLONE(const struct ovnact_nest *on,
     struct ofpact_nest *clone = ofpbuf_at_assert(ofpacts, ofs, sizeof *clone);
     ofpacts->header = clone;
     ofpact_finish_CLONE(ofpacts, &clone);
+    return true;
 }
 
 static void
@@ -1641,7 +1670,7 @@ encode_event_empty_lb_backends_opts(struct ofpbuf *ofpacts,
     }
 }
 
-static void
+static bool
 encode_TRIGGER_EVENT(const struct ovnact_controller_event *event,
                      const struct ovnact_encode_params *ep OVS_UNUSED,
                      struct ofpbuf *ofpacts)
@@ -1655,7 +1684,7 @@ encode_TRIGGER_EVENT(const struct ovnact_controller_event *event,
         if (meter_id == EXT_TABLE_ID_INVALID) {
             VLOG_WARN("Unable to assign id for trigger meter: %s",
                       event->meter);
-            return;
+            return false;
         }
     }
 
@@ -1674,6 +1703,7 @@ encode_TRIGGER_EVENT(const struct ovnact_controller_event *event,
     }
 
     encode_finish_controller_op(oc_offset, ofpacts);
+    return true;
 }
 
 static void
@@ -1735,20 +1765,22 @@ encode_get_mac(const struct ovnact_get_mac_bind *get_mac,
     encode_restore_args(args, ARRAY_SIZE(args), ofpacts);
 }
 
-static void
+static bool
 encode_GET_ARP(const struct ovnact_get_mac_bind *get_mac,
                const struct ovnact_encode_params *ep,
                struct ofpbuf *ofpacts)
 {
     encode_get_mac(get_mac, MFF_REG0, ep, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_GET_ND(const struct ovnact_get_mac_bind *get_mac,
               const struct ovnact_encode_params *ep,
               struct ofpbuf *ofpacts)
 {
     encode_get_mac(get_mac, MFF_XXREG0, ep, ofpacts);
+    return true;
 }
 
 static void
@@ -1809,20 +1841,22 @@ encode_put_mac(const struct ovnact_put_mac_bind *put_mac,
     encode_restore_args(args, ARRAY_SIZE(args), ofpacts);
 }
 
-static void
+static bool
 encode_PUT_ARP(const struct ovnact_put_mac_bind *put_mac,
                const struct ovnact_encode_params *ep OVS_UNUSED,
                struct ofpbuf *ofpacts)
 {
     encode_put_mac(put_mac, MFF_REG0, ACTION_OPCODE_PUT_ARP, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_PUT_ND(const struct ovnact_put_mac_bind *put_mac,
               const struct ovnact_encode_params *ep OVS_UNUSED,
               struct ofpbuf *ofpacts)
 {
     encode_put_mac(put_mac, MFF_XXREG0, ACTION_OPCODE_PUT_ND, ofpacts);
+    return true;
 }
 
 static void
@@ -1887,20 +1921,22 @@ encode_lookup_mac_bind(const struct ovnact_lookup_mac_bind *lookup_mac,
     encode_restore_args(args, ARRAY_SIZE(args), ofpacts);
 }
 
-static void
+static bool
 encode_LOOKUP_ARP(const struct ovnact_lookup_mac_bind *lookup_mac,
                   const struct ovnact_encode_params *ep,
                   struct ofpbuf *ofpacts)
 {
     encode_lookup_mac_bind(lookup_mac, MFF_REG0, ep, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_LOOKUP_ND(const struct ovnact_lookup_mac_bind *lookup_mac,
                         const struct ovnact_encode_params *ep,
                         struct ofpbuf *ofpacts)
 {
     encode_lookup_mac_bind(lookup_mac, MFF_XXREG0, ep, ofpacts);
+    return true;
 }
 
 static void
@@ -1993,20 +2029,22 @@ encode_lookup_mac_bind_ip(const struct ovnact_lookup_mac_bind_ip *lookup_mac,
     encode_restore_args(args, ARRAY_SIZE(args), ofpacts);
 }
 
-static void
+static bool
 encode_LOOKUP_ARP_IP(const struct ovnact_lookup_mac_bind_ip *lookup_mac,
                      const struct ovnact_encode_params *ep,
                      struct ofpbuf *ofpacts)
 {
     encode_lookup_mac_bind_ip(lookup_mac, MFF_REG0, ep, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_LOOKUP_ND_IP(const struct ovnact_lookup_mac_bind_ip *lookup_mac,
                     const struct ovnact_encode_params *ep,
                     struct ofpbuf *ofpacts)
 {
     encode_lookup_mac_bind_ip(lookup_mac, MFF_XXREG0, ep, ofpacts);
+    return true;
 }
 
 static void
@@ -2521,7 +2559,7 @@ encode_put_dhcpv6_option(const struct ovnact_gen_option *o,
     }
 }
 
-static void
+static bool
 encode_PUT_DHCPV4_OPTS(const struct ovnact_put_opts *pdo,
                        const struct ovnact_encode_params *ep OVS_UNUSED,
                        struct ofpbuf *ofpacts)
@@ -2572,9 +2610,10 @@ encode_PUT_DHCPV4_OPTS(const struct ovnact_put_opts *pdo,
     }
 
     encode_finish_controller_op(oc_offset, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_PUT_DHCPV6_OPTS(const struct ovnact_put_opts *pdo,
                        const struct ovnact_encode_params *ep OVS_UNUSED,
                        struct ofpbuf *ofpacts)
@@ -2593,6 +2632,7 @@ encode_PUT_DHCPV6_OPTS(const struct ovnact_put_opts *pdo,
     }
 
     encode_finish_controller_op(oc_offset, ofpacts);
+    return true;
 }
 
 static void
@@ -2607,12 +2647,13 @@ format_DHCP6_REPLY(const struct ovnact_null *a OVS_UNUSED, struct ds *s)
     ds_put_cstr(s, "handle_dhcpv6_reply;");
 }
 
-static void
+static bool
 encode_DHCP6_REPLY(const struct ovnact_null *a OVS_UNUSED,
                    const struct ovnact_encode_params *ep OVS_UNUSED,
                    struct ofpbuf *ofpacts)
 {
     encode_controller_op(ACTION_OPCODE_DHCP6_SERVER, ofpacts);
+    return true;
 }
 
 static void
@@ -2642,12 +2683,13 @@ format_SET_QUEUE(const struct ovnact_set_queue *set_queue, struct ds *s)
     ds_put_format(s, "set_queue(%d);", set_queue->queue_id);
 }
 
-static void
+static bool
 encode_SET_QUEUE(const struct ovnact_set_queue *set_queue,
                  const struct ovnact_encode_params *ep OVS_UNUSED,
                  struct ofpbuf *ofpacts)
 {
     ofpact_put_SET_QUEUE(ofpacts)->queue_id = set_queue->queue_id;
+    return true;
 }
 
 static void
@@ -2694,7 +2736,7 @@ format_DNS_LOOKUP(const struct ovnact_result *dl, struct ds *s)
     ds_put_cstr(s, " = dns_lookup();");
 }
 
-static void
+static bool
 encode_DNS_LOOKUP(const struct ovnact_result *dl,
                   const struct ovnact_encode_params *ep OVS_UNUSED,
                   struct ofpbuf *ofpacts)
@@ -2708,6 +2750,7 @@ encode_DNS_LOOKUP(const struct ovnact_result *dl,
     ovs_be32 ofs = htonl(dst.ofs);
     ofpbuf_put(ofpacts, &ofs, sizeof ofs);
     encode_finish_controller_op(oc_offset, ofpacts);
+    return true;
 }
 
 
@@ -2878,7 +2921,7 @@ encode_put_nd_ra_option(const struct ovnact_gen_option *o,
     }
 }
 
-static void
+static bool
 encode_PUT_ND_RA_OPTS(const struct ovnact_put_opts *po,
                       const struct ovnact_encode_params *ep OVS_UNUSED,
                       struct ofpbuf *ofpacts)
@@ -2915,6 +2958,7 @@ encode_PUT_ND_RA_OPTS(const struct ovnact_put_opts *po,
     }
 
     encode_finish_controller_op(oc_offset, ofpacts);
+    return true;
 }
 
 
@@ -3031,7 +3075,7 @@ format_LOG(const struct ovnact_log *log, struct ds *s)
     ds_put_cstr(s, ");");
 }
 
-static void
+static bool
 encode_LOG(const struct ovnact_log *log,
            const struct ovnact_encode_params *ep, struct ofpbuf *ofpacts)
 {
@@ -3042,7 +3086,7 @@ encode_LOG(const struct ovnact_log *log,
                                               ep->lflow_uuid);
         if (meter_id == EXT_TABLE_ID_INVALID) {
             VLOG_WARN("Unable to assign id for log meter: %s", log->meter);
-            return;
+            return false;
         }
     }
 
@@ -3059,6 +3103,7 @@ encode_LOG(const struct ovnact_log *log,
     }
 
     encode_finish_controller_op(oc_offset, ofpacts);
+    return true;
 }
 
 static void
@@ -3112,7 +3157,7 @@ format_SET_METER(const struct ovnact_set_meter *cl, struct ds *s)
     }
 }
 
-static void
+static bool
 encode_SET_METER(const struct ovnact_set_meter *cl,
                  const struct ovnact_encode_params *ep,
                  struct ofpbuf *ofpacts)
@@ -3137,12 +3182,14 @@ encode_SET_METER(const struct ovnact_set_meter *cl,
                                           ep->lflow_uuid);
     free(name);
     if (table_id == EXT_TABLE_ID_INVALID) {
-        return;
+        VLOG_DBG("EXT_TABLE_ID_INVALID in %s.",  __func__);
+        return false;
     }
 
     /* Create an action to set the meter. */
     om = ofpact_put_METER(ofpacts);
     om->meter_id = table_id;
+    return true;
 }
 
 static void
@@ -3167,7 +3214,7 @@ format_OVNFIELD_LOAD(const struct ovnact_load *load , struct ds *s)
     }
 }
 
-static void
+static bool
 encode_OVNFIELD_LOAD(const struct ovnact_load *load,
             const struct ovnact_encode_params *ep OVS_UNUSED,
             struct ofpbuf *ofpacts)
@@ -3194,6 +3241,7 @@ encode_OVNFIELD_LOAD(const struct ovnact_load *load,
     default:
         OVS_NOT_REACHED();
     }
+    return true;
 }
 
 static void
@@ -3229,7 +3277,7 @@ format_CHECK_PKT_LARGER(const struct ovnact_check_pkt_larger *cipl,
     ds_put_format(s, " = check_pkt_larger(%d);", cipl->pkt_len);
 }
 
-static void
+static bool
 encode_CHECK_PKT_LARGER(const struct ovnact_check_pkt_larger *cipl,
                         const struct ovnact_encode_params *ep OVS_UNUSED,
                         struct ofpbuf *ofpacts)
@@ -3238,6 +3286,7 @@ encode_CHECK_PKT_LARGER(const struct ovnact_check_pkt_larger *cipl,
         ofpact_put_CHECK_PKT_LARGER(ofpacts);
     check_pkt_larger->pkt_len = cipl->pkt_len;
     check_pkt_larger->dst = expr_resolve_field(&cipl->dst);
+    return true;
 }
 
 static void
@@ -3274,14 +3323,16 @@ format_BIND_VPORT(const struct ovnact_bind_vport *bind_vp,
     ds_put_cstr(s, ");");
 }
 
-static void
+static bool
 encode_BIND_VPORT(const struct ovnact_bind_vport *vp,
                  const struct ovnact_encode_params *ep,
                  struct ofpbuf *ofpacts)
 {
     uint32_t vport_key;
     if (!ep->lookup_port(ep->aux, vp->vport, &vport_key)) {
-        return;
+        VLOG_DBG("Port lookup failed for '%s' in %s.",
+                  vp->vport, __func__);
+        return false;
     }
 
     const struct arg args[] = {
@@ -3295,6 +3346,7 @@ encode_BIND_VPORT(const struct ovnact_bind_vport *vp,
     ofpbuf_put(ofpacts, &vp_key, sizeof(ovs_be32));
     encode_finish_controller_op(oc_offset, ofpacts);
     encode_restore_args(args, ARRAY_SIZE(args), ofpacts);
+    return true;
 }
 
 static void
@@ -3325,7 +3377,7 @@ format_HANDLE_SVC_CHECK(const struct ovnact_handle_svc_check *svc_chk,
     ds_put_cstr(s, ");");
 }
 
-static void
+static bool
 encode_HANDLE_SVC_CHECK(const struct ovnact_handle_svc_check *svc_chk,
                         const struct ovnact_encode_params *ep OVS_UNUSED,
                         struct ofpbuf *ofpacts)
@@ -3336,6 +3388,7 @@ encode_HANDLE_SVC_CHECK(const struct ovnact_handle_svc_check *svc_chk,
     encode_setup_args(args, ARRAY_SIZE(args), ofpacts);
     encode_controller_op(ACTION_OPCODE_HANDLE_SVC_CHECK, ofpacts);
     encode_restore_args(args, ARRAY_SIZE(args), ofpacts);
+    return true;
 }
 
 static void
@@ -3427,14 +3480,14 @@ format_FWD_GROUP(const struct ovnact_fwd_group *fwd_group, struct ds *s)
     ds_put_cstr(s, ");");
 }
 
-static void
+static bool
 encode_FWD_GROUP(const struct ovnact_fwd_group *fwd_group,
                  const struct ovnact_encode_params *ep,
                  struct ofpbuf *ofpacts)
 {
     if (!fwd_group->n_child_ports) {
         /* Nothing to do without child ports */
-        return;
+        return true;
     }
 
     uint32_t reg_index = MFF_LOG_OUTPORT - MFF_REG0;
@@ -3450,16 +3503,20 @@ encode_FWD_GROUP(const struct ovnact_fwd_group *fwd_group,
 
         /* Find the tunnel key of the logical port */
         if (!ep->lookup_port(ep->aux, port_name, &port_tunnel_key)) {
+            VLOG_DBG("port lookup failed for '%s' in %s.",
+                     port_name, __func__);
             ds_destroy(&ds);
-            return;
+            return false;
         }
         ds_put_format(&ds, ",bucket=");
 
         if (fwd_group->liveness) {
             /* Find the openflow port number of the tunnel port */
             if (!ep->tunnel_ofport(ep->aux, port_name, &ofport)) {
+                VLOG_DBG("Port lookup failed for '%s' in %s.",
+                         port_name, __func__);
                 ds_destroy(&ds);
-                return;
+                return false;
             }
 
             /* Watch port for failure, used with BFD */
@@ -3477,12 +3534,14 @@ encode_FWD_GROUP(const struct ovnact_fwd_group *fwd_group,
                                           ep->lflow_uuid);
     ds_destroy(&ds);
     if (table_id == EXT_TABLE_ID_INVALID) {
-        return;
+        VLOG_DBG("EXT_TABLE_ID_INVALID in %s.", __func__);
+        return false;
     }
 
     /* Create an action to set the group */
     og = ofpact_put_GROUP(ofpacts);
     og->group_id = table_id;
+    return true;
 }
 
 static void
@@ -3541,20 +3600,22 @@ encode_chk_lb_hairpin__(const struct ovnact_result *res,
     orm->src.n_bits = 1;
 }
 
-static void
+static bool
 encode_CHK_LB_HAIRPIN(const struct ovnact_result *res,
                       const struct ovnact_encode_params *ep,
                       struct ofpbuf *ofpacts)
 {
     encode_chk_lb_hairpin__(res, ep->lb_hairpin_ptable, ofpacts);
+    return true;
 }
 
-static void
+static bool
 encode_CHK_LB_HAIRPIN_REPLY(const struct ovnact_result *res,
                             const struct ovnact_encode_params *ep,
                             struct ofpbuf *ofpacts)
 {
     encode_chk_lb_hairpin__(res, ep->lb_hairpin_reply_ptable, ofpacts);
+    return true;
 }
 
 static void
@@ -3563,12 +3624,13 @@ format_CT_SNAT_TO_VIP(const struct ovnact_null *null OVS_UNUSED, struct ds *s)
     ds_put_cstr(s, "ct_snat_to_vip;");
 }
 
-static void
+static bool
 encode_CT_SNAT_TO_VIP(const struct ovnact_null *null OVS_UNUSED,
                       const struct ovnact_encode_params *ep,
                       struct ofpbuf *ofpacts)
 {
     emit_resubmit(ofpacts, ep->ct_snat_vip_ptable);
+    return true;
 }
 
 /* Parses an assignment or exchange or put_dhcp_opts action. */
@@ -3849,16 +3911,15 @@ ovnacts_format(const struct ovnact *ovnacts, size_t ovnacts_len,
 
 /* Encoding ovnacts to OpenFlow. */
 
-static void
+static bool
 ovnact_encode(const struct ovnact *a, const struct ovnact_encode_params *ep,
               struct ofpbuf *ofpacts)
 {
     switch (a->type) {
-#define OVNACT(ENUM, STRUCT)                                            \
-        case OVNACT_##ENUM:                                             \
-            encode_##ENUM(ALIGNED_CAST(const struct STRUCT *, a),       \
-                          ep, ofpacts);                                 \
-            break;
+#define OVNACT(ENUM, STRUCT)                                             \
+        case OVNACT_##ENUM:                                              \
+            return encode_##ENUM(ALIGNED_CAST(const struct STRUCT *, a), \
+                                 ep, ofpacts);
         OVNACTS
 #undef OVNACT
     default:
@@ -3867,8 +3928,9 @@ ovnact_encode(const struct ovnact *a, const struct ovnact_encode_params *ep,
 }
 
 /* Appends ofpacts to 'ofpacts' that represent the actions in the 'ovnacts_len'
- * bytes of actions starting at 'ovnacts'. */
-void
+ * bytes of actions starting at 'ovnacts'.
+ * Returns 'true' is actions successfully encoded.  'false' otherwise. */
+bool
 ovnacts_encode(const struct ovnact *ovnacts, size_t ovnacts_len,
                const struct ovnact_encode_params *ep,
                struct ofpbuf *ofpacts)
@@ -3877,9 +3939,12 @@ ovnacts_encode(const struct ovnact *ovnacts, size_t ovnacts_len,
         const struct ovnact *a;
 
         OVNACT_FOR_EACH (a, ovnacts, ovnacts_len) {
-            ovnact_encode(a, ep, ofpacts);
+            if (!ovnact_encode(a, ep, ofpacts)) {
+                return false;
+            }
         }
     }
+    return true;
 }
 
 /* Freeing ovnacts. */

@@ -742,7 +742,7 @@ struct ovnact_encode_params {
                                   * 'ct_snat_to_vip' to resubmit. */
 };
 
-void ovnacts_encode(const struct ovnact[], size_t ovnacts_len,
+bool ovnacts_encode(const struct ovnact[], size_t ovnacts_len,
                     const struct ovnact_encode_params *,
                     struct ofpbuf *ofpacts);
 

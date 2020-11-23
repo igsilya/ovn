@@ -1823,6 +1823,7 @@ static void init_lflow_ctx(struct engine_node *node,
         l_ctx_out->lflow_cache_map = NULL;
     }
     l_ctx_out->conj_id_overflow = false;
+    l_ctx_out->actions_encoding_failed = false;
 }
 
 static void *
@@ -1911,7 +1912,10 @@ en_flow_output_run(struct engine_node *node, void *data)
     init_lflow_ctx(node, rt_data, fo, &l_ctx_in, &l_ctx_out);
     lflow_run(&l_ctx_in, &l_ctx_out);
 
-    if (l_ctx_out.conj_id_overflow) {
+    if (l_ctx_out.actions_encoding_failed) {
+        engine_set_node_state(node, EN_ABORTED);
+        return;
+    } else if (l_ctx_out.conj_id_overflow) {
         /* Conjunction ids overflow. There can be many holes in between.
          * Destroy lflow cache and call lflow_run() again. */
         ovn_desired_flow_table_clear(flow_table);

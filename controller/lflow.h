@@ -150,6 +150,7 @@ struct lflow_ctx_out {
     struct hmap *lflow_cache_map;
     uint32_t *conj_id_ofs;
     bool conj_id_overflow;
+    bool actions_encoding_failed;
 };
 
 void lflow_init(void);

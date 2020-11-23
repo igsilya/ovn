@@ -101,8 +101,13 @@ lookup_port_cb(const void *aux_, const char *port_name, unsigned int *portp)
         aux->sbrec_multicast_group_by_name_datapath, aux->dp, port_name);
     if (mg) {
         *portp = mg->tunnel_key;
+        VLOG_DBG("Multicast Group found for port name: %s, datapath: "
+                 UUID_FMT ", tunnel_key: %u", port_name,
+                 UUID_ARGS(&aux->dp->header_.uuid), *portp);
         return true;
     }
+    VLOG_WARN("Multicast Group not found for port name: %s, datapath: "
+              UUID_FMT, port_name, UUID_ARGS(&aux->dp->header_.uuid));
 
     return false;
 }
@@ -538,6 +543,12 @@ lflow_handle_changed_flows(struct lflow_ctx_in *l_ctx_in,
                 l_ctx_out->conj_id_overflow = true;
                 break;
             }
+            if (l_ctx_out->actions_encoding_failed) {
+                VLOG_DBG("%s: Actions encoding failed for lflow " UUID_FMT,
+                         __func__, UUID_ARGS(&lflow->header_.uuid));
+                ret = false;
+                break;
+            }
         }
     }
     dhcp_opts_destroy(&dhcp_opts);
@@ -633,6 +644,12 @@ lflow_handle_changed_ref(enum ref_type ref_type, const char *ref_name,
             l_ctx_out->conj_id_overflow = true;
             break;
         }
+        if (l_ctx_out->actions_encoding_failed) {
+            VLOG_DBG("%s: Actions encoding failed for lflow " UUID_FMT,
+                     __func__, UUID_ARGS(&lflow->header_.uuid));
+            ret = false;
+            break;
+        }
         *changed = true;
     }
     HMAP_FOR_EACH_SAFE (ofrn, ofrn_next, hmap_node, &flood_remove_nodes) {
@@ -703,7 +720,13 @@ add_matches_to_flow_table(const struct sbrec_logical_flow *lflow,
         .lb_hairpin_reply_ptable = OFTABLE_CHK_LB_HAIRPIN_REPLY,
         .ct_snat_vip_ptable = OFTABLE_CT_SNAT_FOR_VIP,
     };
-    ovnacts_encode(ovnacts->data, ovnacts->size, &ep, &ofpacts);
+    if (!ovnacts_encode(ovnacts->data, ovnacts->size, &ep, &ofpacts)) {
+        VLOG_WARN("Actions encoding failed for lflow "UUID_FMT,
+                  UUID_ARGS(&lflow->header_.uuid));
+        l_ctx_out->actions_encoding_failed = true;
+        ofpbuf_uninit(&ofpacts);
+        return;
+    }
 
     struct expr_match *m;
     HMAP_FOR_EACH (m, hmap_node, matches) {
@@ -922,6 +945,11 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
         ovnacts_free(ovnacts.data, ovnacts.size);
         ofpbuf_uninit(&ovnacts);
         expr_matches_destroy(&matches);
+        if (l_ctx_out->actions_encoding_failed) {
+            VLOG_DBG("%s: Actions encoding failed for lflow " UUID_FMT,
+                     __func__, UUID_ARGS(&lflow->header_.uuid));
+            return true;
+        }
         return update_conj_id_ofs(l_ctx_out->conj_id_ofs, n_conjs);
     }
 
@@ -935,6 +963,10 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
         add_matches_to_flow_table(lflow, dp, lc->expr_matches, lc->conj_id_ofs,
                                   ptable, output_ptable, &ovnacts, ingress,
                                   l_ctx_in, l_ctx_out);
+        if (l_ctx_out->actions_encoding_failed) {
+            VLOG_DBG("%s: Actions encoding failed for lflow " UUID_FMT,
+                     __func__, UUID_ARGS(&lflow->header_.uuid));
+        }
         ovnacts_free(ovnacts.data, ovnacts.size);
         ofpbuf_uninit(&ovnacts);
         expr_destroy(prereqs);
@@ -1013,6 +1045,11 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
     add_matches_to_flow_table(lflow, dp, matches, lc->conj_id_ofs,
                               ptable, output_ptable, &ovnacts, ingress,
                               l_ctx_in, l_ctx_out);
+    if (l_ctx_out->actions_encoding_failed) {
+        VLOG_DBG("%s: Actions encoding failed for lflow " UUID_FMT,
+                 __func__, UUID_ARGS(&lflow->header_.uuid));
+    }
+
     ovnacts_free(ovnacts.data, ovnacts.size);
     ofpbuf_uninit(&ovnacts);
 
@@ -1057,6 +1094,10 @@ consider_logical_flow(const struct sbrec_logical_flow *lflow,
                                      l_ctx_in, l_ctx_out)) {
             ret = false;
         }
+    }
+    if (l_ctx_out->actions_encoding_failed) {
+        VLOG_DBG("%s: Actions encoding failed for lflow " UUID_FMT,
+                 __func__, UUID_ARGS(&lflow->header_.uuid));
     }
     return ret;
 }
@@ -1469,6 +1510,12 @@ lflow_add_flows_for_datapath(const struct sbrec_datapath_binding *dp,
                                               l_ctx_in, l_ctx_out)) {
             handled = false;
             l_ctx_out->conj_id_overflow = true;
+            break;
+        }
+        if (l_ctx_out->actions_encoding_failed) {
+            VLOG_DBG("%s: Actions encoding failed for lflow " UUID_FMT,
+                     __func__, UUID_ARGS(&lflow->header_.uuid));
+            handled = false;
             break;
         }
     }
