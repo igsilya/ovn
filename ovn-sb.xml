@@ -2374,6 +2374,11 @@ tcp.flags = RST;
       </dl>
     </column>
 
+    <column name="multicast_groups">
+      Set of multicast groups referenced in
+      <ref column="actions" table="Logical_Flow"/> column.
+    </column>
+
     <column name="external_ids" key="stage-name">
       Human-readable name for this flow's stage in the pipeline.
     </column>

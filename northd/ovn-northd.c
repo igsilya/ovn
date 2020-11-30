@@ -3777,6 +3777,7 @@ struct ovn_multicast {
     struct hmap_node hmap_node; /* Index on 'datapath' and 'key'. */
     struct ovn_datapath *datapath;
     const struct multicast_group *group;
+    const struct sbrec_multicast_group *sb;
 
     struct ovn_port **ports;
     size_t n_ports, allocated_ports;
@@ -3805,6 +3806,22 @@ ovn_multicast_find(struct hmap *mcgroups, struct ovn_datapath *datapath,
     return NULL;
 }
 
+static struct ovn_multicast *
+ovn_multicast_from_sbrec(struct hmap *mcgroups, struct hmap *datapaths,
+                         const struct sbrec_multicast_group *sbmc)
+{
+     struct ovn_datapath *od = ovn_datapath_from_sbrec(datapaths,
+                                                       sbmc->datapath);
+
+    if (!od || ovn_datapath_is_stale(od)) {
+        return NULL;
+    }
+
+    struct multicast_group group = { .name = sbmc->name,
+                                     .key = sbmc->tunnel_key };
+    return ovn_multicast_find(mcgroups, od, &group);
+}
+
 static void
 ovn_multicast_add_ports(struct hmap *mcgroups, struct ovn_datapath *od,
                         const struct multicast_group *group,
@@ -3816,9 +3833,12 @@ ovn_multicast_add_ports(struct hmap *mcgroups, struct ovn_datapath *od,
         hmap_insert(mcgroups, &mc->hmap_node, ovn_multicast_hash(od, group));
         mc->datapath = od;
         mc->group = group;
+        mc->sb = NULL;
         mc->n_ports = 0;
         mc->allocated_ports = 4;
         mc->ports = xmalloc(mc->allocated_ports * sizeof *mc->ports);
+        VLOG_DBG("%s: mcgroup added: '%s' key %d, dp 0x%"PRIxPTR,
+                 __func__, group->name, group->key, (intptr_t) od);
     }
 
     size_t n_ports_total = mc->n_ports + n_ports;
@@ -3854,7 +3874,7 @@ ovn_multicast_destroy(struct hmap *mcgroups, struct ovn_multicast *mc)
 }
 
 static void
-ovn_multicast_update_sbrec(const struct ovn_multicast *mc,
+ovn_multicast_update_sbrec(struct ovn_multicast *mc,
                            const struct sbrec_multicast_group *sb)
 {
     struct sbrec_port_binding **ports = xmalloc(mc->n_ports * sizeof *ports);
@@ -3863,6 +3883,7 @@ ovn_multicast_update_sbrec(const struct ovn_multicast *mc,
     }
     sbrec_multicast_group_set_ports(sb, ports, mc->n_ports);
     free(ports);
+    mc->sb = sb;
 }
 
 /*
@@ -4093,6 +4114,8 @@ struct ovn_lflow {
     char *match;
     char *actions;
     char *stage_hint;
+    struct multicast_group **mc_groups;
+    size_t n_mc_groups;
     const char *where;
 };
 
@@ -4139,6 +4162,8 @@ ovn_lflow_init(struct ovn_lflow *lflow,
     lflow->priority = priority;
     lflow->match = match;
     lflow->actions = actions;
+    lflow->mc_groups = NULL;
+    lflow->n_mc_groups = 0;
     lflow->stage_hint = stage_hint;
     lflow->where = where;
 }
@@ -4148,6 +4173,7 @@ static void
 ovn_lflow_add_at(struct hmap *lflow_map, struct ovn_datapath *od,
                  enum ovn_stage stage, uint16_t priority,
                  const char *match, const char *actions,
+                 const struct multicast_group **mc_groups, size_t n_mc_groups,
                  const struct ovsdb_idl_row *stage_hint, const char *where)
 {
     ovs_assert(ovn_stage_to_datapath_type(stage) == ovn_datapath_get_type(od));
@@ -4167,6 +4193,11 @@ ovn_lflow_add_at(struct hmap *lflow_map, struct ovn_datapath *od,
         hmapx_add(&old_lflow->od, od);
     } else {
         hmapx_add(&lflow->od, od);
+        if (n_mc_groups) {
+            lflow->n_mc_groups = n_mc_groups;
+            lflow->mc_groups = xmemdup(mc_groups,
+                                       n_mc_groups * sizeof mc_groups[0]);
+        }
         hmap_insert(lflow_map, &lflow->hmap_node, hash);
     }
 }
@@ -4175,11 +4206,22 @@ ovn_lflow_add_at(struct hmap *lflow_map, struct ovn_datapath *od,
 #define ovn_lflow_add_with_hint(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, \
                                 ACTIONS, STAGE_HINT) \
     ovn_lflow_add_at(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, ACTIONS, \
-                     STAGE_HINT, OVS_SOURCE_LOCATOR)
+                     NULL, 0, STAGE_HINT, OVS_SOURCE_LOCATOR)
 
 #define ovn_lflow_add(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, ACTIONS) \
     ovn_lflow_add_with_hint(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, \
                             ACTIONS, NULL)
+
+#define ovn_lflow_add_multicast_with_hint(LFLOW_MAP, OD, STAGE, PRIORITY, \
+                                          MATCH, ACTIONS, MC_GROUPS, \
+                                          N_MC_GROUPS, STAGE_HINT) \
+    ovn_lflow_add_at(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, ACTIONS, \
+                     MC_GROUPS, N_MC_GROUPS, STAGE_HINT, OVS_SOURCE_LOCATOR)
+
+#define ovn_lflow_add_multicast(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, \
+                      ACTIONS, MC_GROUPS, N_MC_GROUPS) \
+    ovn_lflow_add_multicast_with_hint(LFLOW_MAP, OD, STAGE, PRIORITY, MATCH, \
+                                      ACTIONS, MC_GROUPS, N_MC_GROUPS, NULL)
 
 static struct ovn_lflow *
 ovn_lflow_find(struct hmap *lflows,
@@ -4202,6 +4244,7 @@ ovn_lflow_destroy(struct hmap *lflows, struct ovn_lflow *lflow)
             hmap_remove(lflows, &lflow->hmap_node);
         }
         hmapx_destroy(&lflow->od);
+        free(lflow->mc_groups);
         free(lflow->match);
         free(lflow->actions);
         free(lflow->stage_hint);
@@ -6320,9 +6363,11 @@ build_lswitch_rport_arp_req_self_orig_flow(struct ovn_port *op,
 
     ds_put_format(&match, "eth.src == %s && (arp.op == 1 || nd_ns)",
                   ds_cstr(&eth_src));
-    ovn_lflow_add(lflows, od, S_SWITCH_IN_L2_LKUP, priority,
-                  ds_cstr(&match),
-                  "outport = \""MC_FLOOD_L2"\"; output;");
+    const struct multicast_group *mc_group = &mc_flood_l2;
+    ovn_lflow_add_multicast(lflows, od, S_SWITCH_IN_L2_LKUP, priority,
+                            ds_cstr(&match),
+                            "outport = \""MC_FLOOD_L2"\"; output;",
+                            &mc_group, 1);
 
     sset_destroy(&all_eth_addrs);
     ds_destroy(&eth_src);
@@ -6375,12 +6420,16 @@ build_lswitch_rport_arp_req_flow_for_ip(struct sset *ips,
         ds_put_format(&actions, "clone {outport = %s; output; }; "
                                 "outport = \""MC_FLOOD_L2"\"; output;",
                       patch_op->json_key);
+        const struct multicast_group *mc_group = &mc_flood_l2;
+        ovn_lflow_add_multicast_with_hint(lflows, od, S_SWITCH_IN_L2_LKUP,
+                                priority, ds_cstr(&match), ds_cstr(&actions),
+                                &mc_group, 1, stage_hint);
     } else {
         ds_put_format(&actions, "outport = %s; output;", patch_op->json_key);
+        ovn_lflow_add_with_hint(lflows, od, S_SWITCH_IN_L2_LKUP, priority,
+                                ds_cstr(&match), ds_cstr(&actions),
+                                stage_hint);
     }
-    ovn_lflow_add_with_hint(lflows, od, S_SWITCH_IN_L2_LKUP, priority,
-                            ds_cstr(&match), ds_cstr(&actions), stage_hint);
-
     ds_destroy(&match);
     ds_destroy(&actions);
 }
@@ -7072,6 +7121,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                       "handle_svc_check(inport);");
 
         struct mcast_switch_info *mcast_sw_info = &od->mcast_info.sw;
+        const struct multicast_group *mc_groups[2];
 
         if (mcast_sw_info->enabled) {
             ds_clear(&actions);
@@ -7081,29 +7131,35 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                                 "outport = \""MC_MROUTER_STATIC"\"; "
                                 "output; "
                             "};");
+                mc_groups[0] = &mc_mrouter_static;
             }
             ds_put_cstr(&actions, "igmp;");
             /* Punt IGMP traffic to controller. */
-            ovn_lflow_add(lflows, od, S_SWITCH_IN_L2_LKUP, 100,
-                          "ip4 && ip.proto == 2", ds_cstr(&actions));
+            ovn_lflow_add_multicast(lflows, od, S_SWITCH_IN_L2_LKUP, 100,
+                                    "ip4 && ip.proto == 2", ds_cstr(&actions),
+                                    mc_groups, 1);
 
             /* Punt MLD traffic to controller. */
-            ovn_lflow_add(lflows, od, S_SWITCH_IN_L2_LKUP, 100,
-                          "mldv1 || mldv2", ds_cstr(&actions));
+            ovn_lflow_add_multicast(lflows, od, S_SWITCH_IN_L2_LKUP, 100,
+                                    "mldv1 || mldv2", ds_cstr(&actions),
+                                    mc_groups, 1);
 
             /* Flood all IP multicast traffic destined to 224.0.0.X to all
              * ports - RFC 4541, section 2.1.2, item 2.
              */
-            ovn_lflow_add(lflows, od, S_SWITCH_IN_L2_LKUP, 85,
-                          "ip4.mcast && ip4.dst == 224.0.0.0/24",
-                          "outport = \""MC_FLOOD"\"; output;");
+            mc_groups[0] = &mc_flood;
+            ovn_lflow_add_multicast(lflows, od, S_SWITCH_IN_L2_LKUP, 85,
+                                    "ip4.mcast && ip4.dst == 224.0.0.0/24",
+                                    "outport = \""MC_FLOOD"\"; output;",
+                                    mc_groups, 1);
 
             /* Flood all IPv6 multicast traffic destined to reserved
              * multicast IPs (RFC 4291, 2.7.1).
              */
-            ovn_lflow_add(lflows, od, S_SWITCH_IN_L2_LKUP, 85,
-                          "ip6.mcast_flood",
-                          "outport = \""MC_FLOOD"\"; output;");
+            ovn_lflow_add_multicast(lflows, od, S_SWITCH_IN_L2_LKUP, 85,
+                                    "ip6.mcast_flood",
+                                    "outport = \""MC_FLOOD"\"; output;",
+                                    mc_groups, 1);
 
             /* Forward uregistered IP multicast to routers with relay enabled
              * and to any ports configured to flood IP multicast traffic.
@@ -7111,6 +7167,8 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
              * handled by the L2 multicast flow.
              */
             if (!mcast_sw_info->flood_unregistered) {
+                size_t n_mc_groups = 0;
+
                 ds_clear(&actions);
 
                 if (mcast_sw_info->flood_relay) {
@@ -7119,10 +7177,12 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                                     "outport = \""MC_MROUTER_FLOOD"\"; "
                                     "output; "
                                 "}; ");
+                    mc_groups[n_mc_groups++] = &mc_mrouter_flood;
                 }
 
                 if (mcast_sw_info->flood_static) {
                     ds_put_cstr(&actions, "outport =\""MC_STATIC"\"; output;");
+                    mc_groups[n_mc_groups++] = &mc_static;
                 }
 
                 /* Explicitly drop the traffic if relay or static flooding
@@ -7133,13 +7193,18 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                     ds_put_cstr(&actions, "drop;");
                 }
 
-                ovn_lflow_add(lflows, od, S_SWITCH_IN_L2_LKUP, 80,
-                              "ip4.mcast || ip6.mcast", ds_cstr(&actions));
+                ovn_lflow_add_multicast(lflows, od, S_SWITCH_IN_L2_LKUP, 80,
+                                        "ip4.mcast || ip6.mcast",
+                                        ds_cstr(&actions),
+                                        mc_groups, n_mc_groups);
             }
         }
 
-        ovn_lflow_add(lflows, od, S_SWITCH_IN_L2_LKUP, 70, "eth.mcast",
-                      "outport = \""MC_FLOOD"\"; output;");
+        mc_groups[0] = &mc_flood;
+        ovn_lflow_add_multicast(lflows, od, S_SWITCH_IN_L2_LKUP, 70,
+                                "eth.mcast",
+                                "outport = \""MC_FLOOD"\"; output;",
+                                mc_groups, 1);
     }
 
     /* Ingress table 19: Add IP multicast flows learnt from IGMP/MLD
@@ -7188,6 +7253,9 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                           igmp_group->mcgroup.name);
         }
 
+        const struct multicast_group *mc_groups[2];
+        size_t n_mc_groups = 0;
+
         /* Also flood traffic to all multicast routers with relay enabled. */
         if (mcast_sw_info->flood_relay) {
             ds_put_cstr(&actions,
@@ -7195,6 +7263,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                             "outport = \""MC_MROUTER_FLOOD "\"; "
                             "output; "
                         "};");
+            mc_groups[n_mc_groups++] = &mc_mrouter_flood;
         }
         if (mcast_sw_info->flood_static) {
             ds_put_cstr(&actions,
@@ -7202,12 +7271,15 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                             "outport =\""MC_STATIC"\"; "
                             "output; "
                         "};");
+            mc_groups[n_mc_groups++] = &mc_static;
         }
         ds_put_format(&actions, "outport = \"%s\"; output; ",
                       igmp_group->mcgroup.name);
 
-        ovn_lflow_add(lflows, igmp_group->datapath, S_SWITCH_IN_L2_LKUP, 90,
-                      ds_cstr(&match), ds_cstr(&actions));
+        ovn_lflow_add_multicast(lflows, igmp_group->datapath,
+                                S_SWITCH_IN_L2_LKUP, 90,
+                                ds_cstr(&match), ds_cstr(&actions),
+                                mc_groups, n_mc_groups);
     }
 
     /* Ingress table 19: Destination lookup, unicast handling (priority 50), */
@@ -7353,8 +7425,11 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
         }
 
         if (od->has_unknown) {
-            ovn_lflow_add(lflows, od, S_SWITCH_IN_L2_LKUP, 0, "1",
-                          "outport = \""MC_UNKNOWN"\"; output;");
+            const struct multicast_group *mc_group = &mc_unknown;
+
+            ovn_lflow_add_multicast(lflows, od, S_SWITCH_IN_L2_LKUP, 0, "1",
+                                    "outport = \""MC_UNKNOWN"\"; output;",
+                                    &mc_group, 1);
         }
     }
 
@@ -10179,6 +10254,8 @@ build_mcast_lookup_flows_for_lrouter(
         }
 
         struct ovn_igmp_group *igmp_group;
+        const struct multicast_group *mc_groups[2];
+        size_t n_mc_groups = 0;
 
         LIST_FOR_EACH (igmp_group, list_node, &od->mcast_info.groups) {
             ds_clear(match);
@@ -10197,24 +10274,28 @@ build_mcast_lookup_flows_for_lrouter(
                                 "ip.ttl--; "
                                 "next; "
                             "};");
+                mc_groups[n_mc_groups++] = &mc_static;
             }
             ds_put_format(actions, "outport = \"%s\"; ip.ttl--; next;",
                           igmp_group->mcgroup.name);
-            ovn_lflow_add(lflows, od, S_ROUTER_IN_IP_ROUTING, 500,
-                          ds_cstr(match), ds_cstr(actions));
+            mc_groups[n_mc_groups++] = &igmp_group->mcgroup;
+            ovn_lflow_add_multicast(lflows, od, S_ROUTER_IN_IP_ROUTING, 500,
+                                    ds_cstr(match), ds_cstr(actions),
+                                    mc_groups, n_mc_groups);
         }
 
         /* If needed, flood unregistered multicast on statically configured
          * ports. Otherwise drop any multicast traffic.
          */
         if (od->mcast_info.rtr.flood_static) {
-            ovn_lflow_add(lflows, od, S_ROUTER_IN_IP_ROUTING, 450,
+            mc_groups[0] = &mc_static;
+            ovn_lflow_add_multicast(lflows, od, S_ROUTER_IN_IP_ROUTING, 450,
                           "ip4.mcast || ip6.mcast",
                           "clone { "
                                 "outport = \""MC_STATIC"\"; "
                                 "ip.ttl--; "
                                 "next; "
-                          "};");
+                          "};", mc_groups, 1);
         } else {
             ovn_lflow_add(lflows, od, S_ROUTER_IN_IP_ROUTING, 450,
                           "ip4.mcast || ip6.mcast", "drop;");
@@ -11307,6 +11388,82 @@ ovn_sb_set_lflow_logical_datapaths(
     sbrec_logical_flow_set_logical_dp_group(sbflow, dpg->dp_group);
 }
 
+static bool
+check_lflow_multicast_groups(struct hmap *mcgroups, struct ovn_lflow *lflow)
+{
+    if (!lflow->mc_groups) {
+        return true;
+    }
+
+    struct hmapx_node *node, *next_node;
+    struct ovn_datapath *od;
+    size_t i;
+
+    VLOG_DBG("%s: checking lflow 0x%"PRIxPTR, __func__, (intptr_t) lflow);
+    HMAPX_FOR_EACH_SAFE (node, next_node, &lflow->od) {
+        od = node->data;
+        VLOG_DBG("%s: checking datapath 0x%"PRIxPTR, __func__, (intptr_t) od);
+        for (i = 0; i < lflow->n_mc_groups; i++) {
+            if (!ovn_multicast_find(mcgroups, od, lflow->mc_groups[i])) {
+                VLOG_DBG("%s: mcgroup not found: '%s' key %d, dp 0x%"PRIxPTR,
+                         __func__, lflow->mc_groups[i]->name,
+                         lflow->mc_groups[i]->key, (intptr_t) od);
+                hmapx_delete(&lflow->od, node);
+                break;
+            } else {
+                VLOG_DBG("%s: mcgroup found: '%s' key %d, dp 0x%"PRIxPTR,
+                         __func__, lflow->mc_groups[i]->name,
+                         lflow->mc_groups[i]->key, (intptr_t) od);
+            }
+        }
+    }
+    return hmapx_count(&lflow->od) > 0;
+}
+
+static bool
+ovn_sb_set_lflow_multicast_groups(struct hmap *mcgroups,
+                                  const struct sbrec_logical_flow *sbflow,
+                                  struct ovn_lflow *lflow)
+{
+    if (!lflow->mc_groups) {
+        sbrec_logical_flow_set_multicast_groups(sbflow, NULL, 0);
+        return true;
+    }
+    struct sbrec_multicast_group **mc_groups;
+    const struct ovn_multicast *mc;
+    const struct hmapx_node *node;
+    struct ovn_datapath *od;
+    struct hmapx sb_mcg;
+    size_t i;
+
+    hmapx_init(&sb_mcg);
+    HMAPX_FOR_EACH (node, &lflow->od) {
+        od = node->data;
+        for (i = 0; i < lflow->n_mc_groups; i++) {
+            mc = ovn_multicast_find(mcgroups, od, lflow->mc_groups[i]);
+            if (mc && mc->sb) {
+                hmapx_add(&sb_mcg, (void *) mc->sb);
+            } else {
+                VLOG_WARN("mcgroup not found: '%s' key %d, dp 0x%"PRIxPTR,
+                          lflow->mc_groups[i]->name,
+                          lflow->mc_groups[i]->key, (intptr_t) od);
+                hmapx_destroy(&sb_mcg);
+                return false;
+            }
+        }
+    }
+    mc_groups = xmalloc(hmapx_count(&sb_mcg) * sizeof *mc_groups);
+    i = 0;
+    HMAPX_FOR_EACH (node, &sb_mcg) {
+        mc_groups[i++] = node->data;
+    }
+    sbrec_logical_flow_set_multicast_groups(sbflow, mc_groups,
+                                            hmapx_count(&sb_mcg));
+    free(mc_groups);
+    hmapx_destroy(&sb_mcg);
+    return true;
+}
+
 /* Updates the Logical_Flow and Multicast_Group tables in the OVN_SB database,
  * constructing their contents based on the OVN_NB database. */
 static void
@@ -11322,9 +11479,18 @@ build_lflows(struct northd_context *ctx, struct hmap *datapaths,
                                     port_groups, &lflows, mcgroups,
                                     igmp_groups, meter_groups, lbs);
 
+    /* Remove all lflows and datapaths from datapath groups that doesn't have
+     * required multicast groups, */
+    struct ovn_lflow *lflow, *next_lflow;
+    HMAP_FOR_EACH_SAFE (lflow, next_lflow, hmap_node, &lflows) {
+        if (!check_lflow_multicast_groups(mcgroups, lflow)) {
+            VLOG_DBG("%s: lflow 0x%"PRIxPTR " removed", __func__, (intptr_t) lflow);
+            ovn_lflow_destroy(&lflows, lflow);
+        }
+    }
+
     /* Collecting all unique datapath groups. */
     struct hmap dp_groups = HMAP_INITIALIZER(&dp_groups);
-    struct ovn_lflow *lflow;
     HMAP_FOR_EACH (lflow, hmap_node, &lflows) {
         uint32_t hash = hash_int(hmapx_count(&lflow->od), 0);
         struct ovn_dp_group *dpg;
@@ -11398,24 +11564,73 @@ build_lflows(struct northd_context *ctx, struct hmap *datapaths,
                 }
             }
 
-            if (update_datapaths) {
-                ovn_sb_set_lflow_logical_datapaths(ctx, &dp_groups,
-                                                   sbflow, &lflow->od);
+            /* Checking if multicast groups needs update. */
+            const struct sbrec_multicast_group *sbmc;
+            bool update_mc_groups = false;
+
+            if (sbflow->n_multicast_groups != lflow->n_mc_groups) {
+                update_mc_groups = true;
+            } else {
+                for (i = 0; i < sbflow->n_multicast_groups; i++) {
+                    sbmc = sbflow->multicast_groups[i];
+                    if (!ovn_multicast_from_sbrec(mcgroups, datapaths, sbmc)) {
+                        update_mc_groups = true;
+                        break;
+                    }
+                }
             }
-            /* This lflow updated.  Not needed anymore. */
-            ovn_lflow_destroy(&lflows, lflow);
+
+            if (update_datapaths || update_mc_groups) {
+                sbrec_logical_flow_delete(sbflow);
+                //ovn_sb_set_lflow_logical_datapaths(ctx, &dp_groups,
+                //                                   sbflow, &lflow->od);
+            } else {
+                /* This lflow updated.  Not needed anymore. */
+                ovn_lflow_destroy(&lflows, lflow);
+                //sbrec_logical_flow_set_multicast_groups(sbflow, NULL, 0);
+            }
         } else {
             sbrec_logical_flow_delete(sbflow);
         }
         free(od);
     }
 
-    struct ovn_lflow *next_lflow;
+    /* Push changes to the Multicast_Group table to database. */
+    const struct sbrec_multicast_group *sbmc, *next_sbmc;
+    SBREC_MULTICAST_GROUP_FOR_EACH_SAFE (sbmc, next_sbmc, ctx->ovnsb_idl) {
+        struct ovn_multicast *mc;
+
+        mc = ovn_multicast_from_sbrec(mcgroups, datapaths, sbmc);
+        if (mc) {
+            ovn_multicast_update_sbrec(mc, sbmc);
+        } else {
+            sbrec_multicast_group_delete(sbmc);
+        }
+    }
+    struct ovn_multicast *mc;
+    HMAP_FOR_EACH (mc, hmap_node, mcgroups) {
+        if (!mc->datapath || mc->sb) {
+            continue;
+        }
+        sbmc = sbrec_multicast_group_insert(ctx->ovnsb_txn);
+        sbrec_multicast_group_set_datapath(sbmc, mc->datapath->sb);
+        sbrec_multicast_group_set_name(sbmc, mc->group->name);
+        sbrec_multicast_group_set_tunnel_key(sbmc, mc->group->key);
+        ovn_multicast_update_sbrec(mc, sbmc);
+    }
+
+    /* Add remaining logical flows. */
     HMAP_FOR_EACH_SAFE (lflow, next_lflow, hmap_node, &lflows) {
         const char *pipeline = ovn_stage_get_pipeline_name(lflow->stage);
         uint8_t table = ovn_stage_get_table(lflow->stage);
 
         sbflow = sbrec_logical_flow_insert(ctx->ovnsb_txn);
+        if (!ovn_sb_set_lflow_multicast_groups(mcgroups, sbflow, lflow)) {
+            /* Not all required multicast groups are ready yet.  Skipping. */
+            sbrec_logical_flow_delete(sbflow);
+            ovn_lflow_destroy(&lflows, lflow);
+            continue;
+        }
         ovn_sb_set_lflow_logical_datapaths(ctx, &dp_groups, sbflow, &lflow->od);
         sbrec_logical_flow_set_pipeline(sbflow, pipeline);
         sbrec_logical_flow_set_table_id(sbflow, table);
@@ -11455,38 +11670,8 @@ build_lflows(struct northd_context *ctx, struct hmap *datapaths,
     }
     hmap_destroy(&dp_groups);
 
-    /* Push changes to the Multicast_Group table to database. */
-    const struct sbrec_multicast_group *sbmc, *next_sbmc;
-    SBREC_MULTICAST_GROUP_FOR_EACH_SAFE (sbmc, next_sbmc, ctx->ovnsb_idl) {
-        struct ovn_datapath *od = ovn_datapath_from_sbrec(datapaths,
-                                                          sbmc->datapath);
-
-        if (!od || ovn_datapath_is_stale(od)) {
-            sbrec_multicast_group_delete(sbmc);
-            continue;
-        }
-
-        struct multicast_group group = { .name = sbmc->name,
-                                         .key = sbmc->tunnel_key };
-        struct ovn_multicast *mc = ovn_multicast_find(mcgroups, od, &group);
-        if (mc) {
-            ovn_multicast_update_sbrec(mc, sbmc);
-            ovn_multicast_destroy(mcgroups, mc);
-        } else {
-            sbrec_multicast_group_delete(sbmc);
-        }
-    }
-    struct ovn_multicast *mc, *next_mc;
+    struct ovn_multicast *next_mc;
     HMAP_FOR_EACH_SAFE (mc, next_mc, hmap_node, mcgroups) {
-        if (!mc->datapath) {
-            ovn_multicast_destroy(mcgroups, mc);
-            continue;
-        }
-        sbmc = sbrec_multicast_group_insert(ctx->ovnsb_txn);
-        sbrec_multicast_group_set_datapath(sbmc, mc->datapath->sb);
-        sbrec_multicast_group_set_name(sbmc, mc->group->name);
-        sbrec_multicast_group_set_tunnel_key(sbmc, mc->group->key);
-        ovn_multicast_update_sbrec(mc, sbmc);
         ovn_multicast_destroy(mcgroups, mc);
     }
 }
@@ -11993,7 +12178,6 @@ build_mcast_groups(struct northd_context *ctx,
 
     hmap_init(mcast_groups);
     hmap_init(igmp_groups);
-
     HMAP_FOR_EACH (op, key_node, ports) {
         if (op->nbrp && lrport_is_enabled(op->nbrp)) {
             /* If this port is configured to always flood multicast traffic

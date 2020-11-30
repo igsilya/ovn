@@ -1,7 +1,7 @@
 {
     "name": "OVN_Southbound",
     "version": "20.12.0",
-    "cksum": "3969471120 24441",
+    "cksum": "2079343049 24663",
     "tables": {
         "SB_Global": {
             "columns": {
@@ -111,7 +111,11 @@
                 "actions": {"type": "string"},
                 "external_ids": {
                     "type": {"key": "string", "value": "string",
-                             "min": 0, "max": "unlimited"}}},
+                             "min": 0, "max": "unlimited"}},
+                "multicast_groups":
+                    {"type": {"key": {"type": "uuid",
+                                      "refTable": "Multicast_Group"},
+                              "min": 0, "max": "unlimited"}}},
             "isRoot": true},
         "Logical_DP_Group": {
             "columns": {
