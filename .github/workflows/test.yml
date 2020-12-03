@@ -16,6 +16,7 @@ jobs:
       M32:         ${{ matrix.m32 }}
       OPTS:        ${{ matrix.opts }}
       TESTSUITE:   ${{ matrix.testsuite }}
+      OVN_TEST_USE_DP_GROUPS: ${{ matrix.dp_groups }}
 
     name: linux ${{ join(matrix.*, ' ') }}
     runs-on: ubuntu-18.04
@@ -33,6 +34,13 @@ jobs:
             testsuite:    test
           - compiler:     clang
             testsuite:    test
+
+          - compiler:     gcc
+            testsuite:    test
+            dp_groups:    dp_groups
+          - compiler:     clang
+            testsuite:    test
+            dp_groups:    dp_groups
 
           - compiler:     gcc
             testsuite:    test
