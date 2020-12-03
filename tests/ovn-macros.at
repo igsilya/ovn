@@ -188,6 +188,10 @@ ovn_start () {
         ovn-nbctl set NB_Global . name=$1
     fi
 
+    if test -n "$OVN_TEST_USE_DP_GROUPS"; then
+        ovn-nbctl set NB_Global . options:use_logical_dp_groups=true
+    fi
+
     ovn_start_northd primary $AZ
     if $backup_northd; then
         ovn_start_northd backup $AZ

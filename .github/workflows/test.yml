@@ -21,6 +21,7 @@ jobs:
       OPTS:        ${{ matrix.opts }}
       TESTSUITE:   ${{ matrix.testsuite }}
       ASAN:        ${{ matrix.asan }}
+      OVN_TEST_USE_DP_GROUPS: ${{ matrix.dp_groups }}
 
     name: linux ${{ join(matrix.*, ' ') }}
     runs-on: ubuntu-18.04
@@ -38,6 +39,14 @@ jobs:
             testsuite:    test
           - compiler:     clang
             testsuite:    test
+            asan:         asan
+
+          - compiler:     gcc
+            testsuite:    test
+            dp_groups:    dp_groups
+          - compiler:     clang
+            testsuite:    test
+            dp_groups:    dp_groups
             asan:         asan
 
           - compiler:     gcc
