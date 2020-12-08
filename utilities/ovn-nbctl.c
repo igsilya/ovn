@@ -1511,7 +1511,6 @@ nbctl_lsp_add(struct ctl_context *ctx)
     }
 
     /* Insert the logical port into the logical switch. */
-    nbrec_logical_switch_verify_ports(ls);
     nbrec_logical_switch_update_ports_addvalue(ls, lsp);
 
     /* Updating runtime cache. */
@@ -1532,7 +1531,6 @@ remove_lsp(struct ctl_context *ctx,
     /* First remove 'lsp' from the array of ports.  This is what will
      * actually cause the logical port to be deleted when the transaction is
      * sent to the database server (due to garbage collection). */
-    nbrec_logical_switch_verify_ports(ls);
     nbrec_logical_switch_update_ports_delvalue(ls, lsp);
 
     /* Delete 'lsp' from the IDL.  This won't have a real effect on the
@@ -2356,10 +2354,8 @@ nbctl_acl_add(struct ctl_context *ctx)
 
     /* Insert the acl into the logical switch/port group. */
     if (pg) {
-        nbrec_port_group_verify_acls(pg);
         nbrec_port_group_update_acls_addvalue(pg, acl);
     } else {
-        nbrec_logical_switch_verify_acls(ls);
         nbrec_logical_switch_update_acls_addvalue(ls, acl);
     }
 }
@@ -2401,12 +2397,6 @@ nbctl_acl_del(struct ctl_context *ctx)
     /* If priority and match are not specified, delete all ACLs with the
      * specified direction. */
     if (ctx->argc == 3) {
-        if (pg) {
-            nbrec_port_group_verify_acls(pg);
-        } else {
-            nbrec_logical_switch_verify_acls(ls);
-        }
-
         for (size_t i = 0; i < n_acls; i++) {
             if (!strcmp(direction, acls[i]->direction)) {
                 if (pg) {
@@ -2438,10 +2428,8 @@ nbctl_acl_del(struct ctl_context *ctx)
         if (priority == acl->priority && !strcmp(ctx->argv[4], acl->match) &&
              !strcmp(direction, acl->direction)) {
             if (pg) {
-                nbrec_port_group_verify_acls(pg);
                 nbrec_port_group_update_acls_delvalue(pg, acl);
             } else {
-                nbrec_logical_switch_verify_acls(ls);
                 nbrec_logical_switch_update_acls_delvalue(ls, acl);
             }
             return;
@@ -2596,7 +2584,6 @@ nbctl_qos_add(struct ctl_context *ctx)
     }
 
     /* Insert the qos rule the logical switch. */
-    nbrec_logical_switch_verify_qos_rules(ls);
     nbrec_logical_switch_update_qos_rules_addvalue(ls, qos);
 }
 
@@ -2636,7 +2623,6 @@ nbctl_qos_del(struct ctl_context *ctx)
     if (ctx->argc == 3) {
         size_t i;
 
-        nbrec_logical_switch_verify_qos_rules(ls);
         if (qos_rule_uuid) {
             for (i = 0; i < ls->n_qos_rules; i++) {
                 if (uuid_equals(qos_rule_uuid,
@@ -2686,7 +2672,6 @@ nbctl_qos_del(struct ctl_context *ctx)
 
         if (priority == qos->priority && !strcmp(ctx->argv[4], qos->match) &&
              !strcmp(direction, qos->direction)) {
-            nbrec_logical_switch_verify_qos_rules(ls);
             nbrec_logical_switch_update_qos_rules_delvalue(ls, qos);
             return;
         }
@@ -3144,7 +3129,6 @@ nbctl_lr_lb_add(struct ctl_context *ctx)
     }
 
     /* Insert the load balancer into the logical router. */
-    nbrec_logical_router_verify_load_balancer(lr);
     nbrec_logical_router_update_load_balancer_addvalue(lr, new_lb);
 }
 
@@ -3178,7 +3162,6 @@ nbctl_lr_lb_del(struct ctl_context *ctx)
 
         if (uuid_equals(&del_lb->header_.uuid, &lb->header_.uuid)) {
             /* Remove the matching rule. */
-            nbrec_logical_router_verify_load_balancer(lr);
             nbrec_logical_router_update_load_balancer_delvalue(lr, lb);
             return;
         }
@@ -3253,7 +3236,6 @@ nbctl_ls_lb_add(struct ctl_context *ctx)
     }
 
     /* Insert the load balancer into the logical switch. */
-    nbrec_logical_switch_verify_load_balancer(ls);
     nbrec_logical_switch_update_load_balancer_addvalue(ls, new_lb);
 }
 
@@ -3287,7 +3269,6 @@ nbctl_ls_lb_del(struct ctl_context *ctx)
 
         if (uuid_equals(&del_lb->header_.uuid, &lb->header_.uuid)) {
             /* Remove the matching rule. */
-            nbrec_logical_switch_verify_load_balancer(ls);
             nbrec_logical_switch_update_load_balancer_delvalue(ls, lb);
             return;
         }
@@ -3716,7 +3697,6 @@ nbctl_lr_policy_add(struct ctl_context *ctx)
     nbrec_logical_router_policy_set_options(policy, &options);
     smap_destroy(&options);
 
-    nbrec_logical_router_verify_policies(lr);
     nbrec_logical_router_update_policies_addvalue(lr, policy);
     if (next_hop != NULL) {
         free(next_hop);
@@ -3756,7 +3736,6 @@ nbctl_lr_policy_del(struct ctl_context *ctx)
     if (ctx->argc == 3) {
         size_t i;
 
-        nbrec_logical_router_verify_policies(lr);
         if (lr_policy_uuid) {
             for (i = 0; i < lr->n_policies; i++) {
                 if (uuid_equals(lr_policy_uuid,
@@ -3791,7 +3770,6 @@ nbctl_lr_policy_del(struct ctl_context *ctx)
         struct nbrec_logical_router_policy *routing_policy = lr->policies[i];
         if (priority == routing_policy->priority &&
             !strcmp(ctx->argv[3], routing_policy->match)) {
-            nbrec_logical_router_verify_policies(lr);
             nbrec_logical_router_update_policies_delvalue(lr, routing_policy);
             return;
         }
@@ -3991,7 +3969,6 @@ nbctl_lr_route_add(struct ctl_context *ctx)
         nbrec_logical_router_static_route_set_options(route, &options);
     }
 
-    nbrec_logical_router_verify_static_routes(lr);
     nbrec_logical_router_update_static_routes_addvalue(lr, route);
 
 cleanup:
@@ -4050,7 +4027,6 @@ nbctl_lr_route_del(struct ctl_context *ctx)
     }
 
     size_t n_removed = 0;
-    nbrec_logical_router_verify_static_routes(lr);
     for (size_t i = 0; i < lr->n_static_routes; i++) {
         /* Compare route policy, if specified. */
         if (policy) {
@@ -4388,7 +4364,6 @@ nbctl_lr_nat_add(struct ctl_context *ctx)
     smap_destroy(&nat_options);
 
     /* Insert the NAT into the logical router. */
-    nbrec_logical_router_verify_nat(lr);
     nbrec_logical_router_update_nat_addvalue(lr, nat);
 
 cleanup:
@@ -4425,7 +4400,6 @@ nbctl_lr_nat_del(struct ctl_context *ctx)
 
     if (ctx->argc == 3) {
         /*Deletes all NATs with the specified type. */
-        nbrec_logical_router_verify_nat(lr);
         for (size_t i = 0; i < lr->n_nat; i++) {
             if (!strcmp(nat_type, lr->nat[i]->type)) {
                 nbrec_logical_router_update_nat_delvalue(lr, lr->nat[i]);
@@ -4452,7 +4426,6 @@ nbctl_lr_nat_del(struct ctl_context *ctx)
             continue;
         }
         if (!strcmp(nat_type, nat->type) && !strcmp(nat_ip, old_ip)) {
-            nbrec_logical_router_verify_nat(lr);
             nbrec_logical_router_update_nat_delvalue(lr, nat);
             should_return = true;
         }
@@ -4731,7 +4704,6 @@ nbctl_lrp_set_gateway_chassis(struct ctl_context *ctx)
     nbrec_gateway_chassis_set_priority(gc, priority);
 
     /* Insert the logical gateway chassis into the logical router port. */
-    nbrec_logical_router_port_verify_gateway_chassis(lrp);
     nbrec_logical_router_port_update_gateway_chassis_addvalue(lrp, gc);
     free(gc_name);
 }
@@ -4749,7 +4721,6 @@ remove_gc(const struct nbrec_logical_router_port *lrp, size_t idx)
          * will actually cause the gateway chassis to be deleted when the
          * transaction is sent to the database server (due to garbage
          * collection). */
-        nbrec_logical_router_port_verify_gateway_chassis(lrp);
         nbrec_logical_router_port_update_gateway_chassis_delvalue(lrp, gc);
     }
 
@@ -4982,7 +4953,6 @@ nbctl_lrp_add(struct ctl_context *ctx)
     }
 
     /* Insert the logical port into the logical router. */
-    nbrec_logical_router_verify_ports(lr);
     nbrec_logical_router_update_ports_addvalue(lr, lrp);
 
     /* Updating runtime cache. */
@@ -5003,7 +4973,6 @@ remove_lrp(struct ctl_context *ctx,
     /* First remove 'lrp' from the array of ports.  This is what will
      * actually cause the logical port to be deleted when the transaction is
      * sent to the database server (due to garbage collection). */
-    nbrec_logical_router_verify_ports(lr);
     nbrec_logical_router_update_ports_delvalue(lr, lrp);
 
     /* Delete 'lrp' from the IDL.  This won't have a real effect on
@@ -5928,7 +5897,6 @@ cmd_ha_ch_grp_add_chassis(struct ctl_context *ctx)
     nbrec_ha_chassis_set_chassis_name(ha_chassis, chassis_name);
     nbrec_ha_chassis_set_priority(ha_chassis, priority);
 
-    nbrec_ha_chassis_group_verify_ha_chassis(ha_ch_grp);
     nbrec_ha_chassis_group_update_ha_chassis_addvalue(ha_ch_grp, ha_chassis);
 }
 
@@ -5957,7 +5925,6 @@ cmd_ha_ch_grp_remove_chassis(struct ctl_context *ctx)
         return;
     }
 
-    nbrec_ha_chassis_group_verify_ha_chassis(ha_ch_grp);
     nbrec_ha_chassis_group_update_ha_chassis_delvalue(ha_ch_grp, ha_chassis);
     nbrec_ha_chassis_delete(ha_chassis);
 }
