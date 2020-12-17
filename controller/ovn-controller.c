@@ -2767,6 +2767,8 @@ main(int argc, char *argv[])
             struct simap usage = SIMAP_INITIALIZER(&usage);
 
             lflow_cache_get_memory_usage(ctrl_engine_ctx.lflow_cache, &usage);
+            ovsdb_idl_get_memory_usage(ovs_idl_loop.idl, &usage);
+            ovsdb_idl_get_memory_usage(ovnsb_idl_loop.idl, &usage);
             memory_report(&usage);
             simap_destroy(&usage);
         }
