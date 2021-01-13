@@ -6954,7 +6954,7 @@ server_loop(struct ovsdb_idl *idl, int argc, char *argv[])
         if (memory_should_report()) {
             struct simap usage = SIMAP_INITIALIZER(&usage);
 
-            ovsdb_idl_get_memory_usage(idl, &usage);
+            /* Nothing special to report yet. */
             memory_report(&usage);
             simap_destroy(&usage);
         }

@@ -1659,10 +1659,7 @@ main(int argc, char *argv[])
         if (memory_should_report()) {
             struct simap usage = SIMAP_INITIALIZER(&usage);
 
-            ovsdb_idl_get_memory_usage(ovnnb_idl_loop.idl, &usage);
-            ovsdb_idl_get_memory_usage(ovnsb_idl_loop.idl, &usage);
-            ovsdb_idl_get_memory_usage(ovninb_idl_loop.idl, &usage);
-            ovsdb_idl_get_memory_usage(ovnisb_idl_loop.idl, &usage);
+            /* Nothing special to report yet. */
             memory_report(&usage);
             simap_destroy(&usage);
         }
