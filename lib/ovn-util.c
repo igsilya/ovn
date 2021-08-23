@@ -546,8 +546,8 @@ ovn_logical_flow_hash(uint8_t table_id, enum ovn_pipeline pipeline,
                       uint16_t priority,
                       const char *match, const char *actions)
 {
-    size_t hash = hash_2words((table_id << 16) | priority, pipeline);
-    hash = hash_string(match, hash);
+    size_t hash = (pipeline << 24) | (table_id << 16) | priority;
+    hash = hash_add_bytes(hash, match, strlen(match));
     return hash_string(actions, hash);
 }
 
