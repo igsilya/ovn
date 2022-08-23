@@ -3854,6 +3854,7 @@ build_lbs(struct northd_input *input_data, struct hmap *datapaths,
     const struct nbrec_load_balancer_group *nbrec_lb_group;
     struct ovn_lb_group *lb_group;
     struct ovn_northd_lb *lb;
+    long long int start = time_msec();
 
     hmap_init(lbs);
     hmap_init(lb_groups);
@@ -3865,7 +3866,9 @@ build_lbs(struct northd_input *input_data, struct hmap *datapaths,
         hmap_insert(lbs, &lb_nb->hmap_node,
                     uuid_hash(&nbrec_lb->header_.uuid));
     }
+    VLOG_INFO("ovn_northd_lb_create: %lld ms", time_msec() - start);
 
+    start = time_msec();
     NBREC_LOAD_BALANCER_GROUP_TABLE_FOR_EACH (nbrec_lb_group,
                                input_data->nbrec_load_balancer_group_table) {
         lb_group = xzalloc(sizeof *lb_group);
@@ -3886,7 +3889,9 @@ build_lbs(struct northd_input *input_data, struct hmap *datapaths,
         hmap_insert(lb_groups, &lb_group->hmap_node,
                     uuid_hash(&lb_group->uuid));
     }
+    VLOG_INFO("lb_groups alloc: %lld ms", time_msec() - start);
 
+    start = time_msec();
     struct ovn_datapath *od;
     HMAP_FOR_EACH (od, key_node, datapaths) {
         if (!od->nbs) {
@@ -3914,7 +3919,9 @@ build_lbs(struct northd_input *input_data, struct hmap *datapaths,
                                  lb_group->ls);
         }
     }
+    VLOG_INFO("ovn_northd_lb_add_ls: %lld ms", time_msec() - start);
 
+    start = time_msec();
     HMAP_FOR_EACH (od, key_node, datapaths) {
         if (!od->nbr) {
             continue;
@@ -3948,6 +3955,7 @@ build_lbs(struct northd_input *input_data, struct hmap *datapaths,
             ovn_northd_lb_add_lr(lb, 1, &od);
             build_lrouter_lb_ips(od->lb_ips, lb);
         }
+        //VLOG_INFO("od n IPs: %d", (int) sset_count(&od->lb_ips->ips_v4));
     }
 
     HMAP_FOR_EACH (lb_group, hmap_node, lb_groups) {
@@ -3956,6 +3964,7 @@ build_lbs(struct northd_input *input_data, struct hmap *datapaths,
                                  lb_group->lr);
         }
     }
+    VLOG_INFO("ovn_northd_lb_add_lr: %lld ms", time_msec() - start);
 }
 
 static void
@@ -15436,6 +15445,7 @@ northd_init(struct northd_data *data)
 void
 northd_destroy(struct northd_data *data)
 {
+    unsigned long start1 = time_msec();
     struct ovn_northd_lb *lb;
     HMAP_FOR_EACH_POP (lb, hmap_node, &data->lbs) {
         ovn_northd_lb_destroy(lb);
@@ -15475,8 +15485,11 @@ northd_destroy(struct northd_data *data)
      */
     cleanup_macam();
 
+    unsigned long start = time_msec();
     destroy_datapaths_and_ports(&data->datapaths, &data->ports,
                                 &data->lr_list);
+    VLOG_INFO("destroy_datapaths_and_ports: %lld ms", time_msec() - start);
+    VLOG_INFO("northd_destroy: %lld ms", time_msec() - start1);
 }
 
 static void
@@ -15560,13 +15573,21 @@ ovnnb_db_run(struct northd_input *input_data,
                                               false);
 
     build_chassis_features(input_data, &data->features);
+    long long int start = time_msec();
     build_datapaths(input_data, ovnsb_txn, &data->datapaths, &data->lr_list);
+    VLOG_INFO("build_datapaths: %lld ms", time_msec() - start);
+    start = time_msec();
     build_lbs(input_data, &data->datapaths, &data->lbs, &data->lb_groups);
+    VLOG_INFO("build_lbs: %lld ms", time_msec() - start);
+    start = time_msec();
     build_ports(input_data, ovnsb_txn, sbrec_chassis_by_name,
                 sbrec_chassis_by_hostname,
                 &data->datapaths, &data->ports);
+    VLOG_INFO("build_ports: %lld ms", time_msec() - start);
+    start = time_msec();
     build_lb_port_related_data(&data->datapaths, &data->ports, &data->lbs,
                                &data->lb_groups, input_data, ovnsb_txn);
+    VLOG_INFO("build_lb_port_related_data: %lld ms", time_msec() - start);
     build_ipam(&data->datapaths, &data->ports);
     build_port_group_lswitches(input_data, &data->port_groups, &data->ports);
     build_lrouter_groups(&data->ports, &data->lr_list);
@@ -15578,7 +15599,9 @@ ovnnb_db_run(struct northd_input *input_data,
     ovn_update_ipv6_options(&data->ports);
     ovn_update_ipv6_prefix(&data->ports);
 
+    start = time_msec();
     sync_lbs(input_data, ovnsb_txn, &data->datapaths, &data->lbs);
+    VLOG_INFO("sync_lbs: %lld ms", time_msec() - start);
     sync_address_sets(input_data, ovnsb_txn, &data->datapaths);
     sync_port_groups(input_data, ovnsb_txn, &data->port_groups);
     sync_meters(input_data, ovnsb_txn, &data->meter_groups);
