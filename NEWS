@@ -6,6 +6,11 @@ OVN v22.12.3 - xx xxx xxxx
     or restart of ovn-controller.
   - Add "garp-max-timeout-sec" config option to vswitchd external-ids to
     cap the time between when ovn-controller sends gARP packets.
+  - Add LS.other_config:broadcast-arps-to-all-routers. If false then arp
+    requests are only send to Logical Routers on that Logical Switch if the
+    target mac address matches. Arp requests matching no Logical Router will
+    only be forwarded to non-router ports. Default is true which keeps the
+    existing behaviour of flooding these arp requests to all attached Ports.
 
 OVN v22.12.2 - 15 Sep 2023
 --------------------------
