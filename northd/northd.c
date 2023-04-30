@@ -4372,11 +4372,12 @@ ovn_dp_group_find(const struct hmap *dp_groups,
 }
 
 static struct sbrec_logical_dp_group *
-ovn_sb_insert_logical_dp_group(struct ovsdb_idl_txn *ovnsb_txn,
-                               const unsigned long *dpg_bitmap,
-                               const struct ovn_datapaths *datapaths)
+ovn_sb_insert_or_update_logical_dp_group(
+                            struct ovsdb_idl_txn *ovnsb_txn,
+                            struct sbrec_logical_dp_group *dp_group,
+                            const unsigned long *dpg_bitmap,
+                            const struct ovn_datapaths *datapaths)
 {
-    struct sbrec_logical_dp_group *dp_group;
     const struct sbrec_datapath_binding **sb;
     size_t n = 0, index;
 
@@ -4384,7 +4385,9 @@ ovn_sb_insert_logical_dp_group(struct ovsdb_idl_txn *ovnsb_txn,
     BITMAP_FOR_EACH_1 (index, ods_size(datapaths), dpg_bitmap) {
         sb[n++] = datapaths->array[index]->sb;
     }
-    dp_group = sbrec_logical_dp_group_insert(ovnsb_txn);
+    if (!dp_group) {
+        dp_group = sbrec_logical_dp_group_insert(ovnsb_txn);
+    }
     sbrec_logical_dp_group_set_datapaths(
         dp_group, (struct sbrec_datapath_binding **) sb, n);
     free(sb);
@@ -4509,9 +4512,19 @@ sync_lbs(struct ovsdb_idl_txn *ovnsb_txn,
                                 hash);
         if (!dpg) {
             dpg = xzalloc(sizeof *dpg);
-            dpg->dp_group = ovn_sb_insert_logical_dp_group(ovnsb_txn,
-                                                           lb->nb_ls_map,
-                                                           ls_datapaths);
+            /* If 'lb->slb->datapath_group' exists at this point, it means that
+             * this group is obsolete and is going to be removed.  This is
+             * because 'dp_groups' contains all the groups that are going to be
+             * used and already in SB as well as new groups added so far.
+             * Chances are, we just added or removed a few LS/LRs, and all LBs
+             * referencing the same group will need the same change.  Update
+             * the group instead of re-creating and updating all the LBs with a
+             * new one.
+             * If it doesn't exist, then it is a new LB that needs a new group,
+             * so it will be created. */
+            dpg->dp_group = ovn_sb_insert_or_update_logical_dp_group(
+                                ovnsb_txn, lb->slb->datapath_group,
+                                lb->nb_ls_map, ls_datapaths);
             dpg->bitmap = bitmap_clone(lb->nb_ls_map, bitmap_len);
             hmap_insert(&dp_groups, &dpg->node, hash);
         }
@@ -15194,7 +15207,8 @@ ovn_sb_set_lflow_logical_dp_group(
     struct hmap *dp_groups,
     const struct sbrec_logical_flow *sbflow,
     const unsigned long *dpg_bitmap,
-    const struct ovn_datapaths *datapaths)
+    const struct ovn_datapaths *datapaths,
+    bool can_modify)
 {
     struct ovn_dp_group *dpg;
     size_t n_ods;
@@ -15214,8 +15228,10 @@ ovn_sb_set_lflow_logical_dp_group(
     ovs_assert(dpg != NULL);
 
     if (!dpg->dp_group) {
-        dpg->dp_group = ovn_sb_insert_logical_dp_group(ovnsb_txn, dpg->bitmap,
-                                                       datapaths);
+        dpg->dp_group = ovn_sb_insert_or_update_logical_dp_group(
+                            ovnsb_txn,
+                            can_modify ? sbflow->logical_dp_group : NULL,
+                            dpg->bitmap, datapaths);
     }
     sbrec_logical_flow_set_logical_dp_group(sbflow, dpg->dp_group);
 }
@@ -15453,7 +15469,7 @@ void build_lflows(struct lflow_input *input_data,
 
             /* This is a valid lflow.  Checking if the datapath group needs
              * updates. */
-            bool update_dp_group = false;
+            bool update_dp_group = false, can_modify = false;
 
             if ((!lflow->dpg && dp_group) || (lflow->dpg && !dp_group)) {
                 /* Need to add or delete datapath group. */
@@ -15471,7 +15487,9 @@ void build_lflows(struct lflow_input *input_data,
                 /* There is a datapath group and we need to perform
                  * a full comparison. */
                 unsigned long *dpg_bitmap;
+                struct ovn_dp_group *dpg;
                 struct ovn_datapath *od;
+                int n = 0;
 
                 dpg_bitmap = bitmap_allocate(n_datapaths);
                 /* Check all logical datapaths from the group. */
@@ -15481,20 +15499,44 @@ void build_lflows(struct lflow_input *input_data,
                             &input_data->lr_datapaths->datapaths,
                             dp_group->datapaths[i]);
                     if (!od || ovn_datapath_is_stale(od)) {
-                        continue;
+                        break;
                     }
                     bitmap_set1(dpg_bitmap, od->index);
+                    n++;
                 }
 
-                update_dp_group = !bitmap_equal(dpg_bitmap, lflow->dpg_bitmap,
-                                                n_datapaths);
+                if (i != dp_group->n_datapaths) {
+                    /* Stale group.  Not going to be used for any flow. */
+                    update_dp_group = true;
+                    can_modify = true;
+                } else if (!bitmap_equal(dpg_bitmap, lflow->dpg_bitmap,
+                                         n_datapaths)) {
+                    /* The group in Sb is different. */
+                    update_dp_group = true;
+
+                    dpg = ovn_dp_group_find(dp_groups, dpg_bitmap,
+                                            n_datapaths, hash_int(n, 0));
+                    if (dpg) {
+                        /* This group is different, but it is going to be used
+                         * for some other flow, so we can't modify it. Shortcut
+                         * the search for the flow that will use it. */
+                        if (!dpg->dp_group) {
+                            dpg->dp_group = dp_group;
+                        }
+                    } else {
+                        /* Stale group.  All datapaths are valid, but no flow
+                         * will use it. */
+                        can_modify = true;
+                    }
+                }
+
                 bitmap_free(dpg_bitmap);
             }
 
             if (update_dp_group) {
                 ovn_sb_set_lflow_logical_dp_group(ovnsb_txn, dp_groups,
                                                   sbflow, lflow->dpg_bitmap,
-                                                  datapaths);
+                                                  datapaths, can_modify);
             } else if (lflow->dpg && !lflow->dpg->dp_group) {
                 /* Setting relation between unique datapath group and
                  * Sb DB datapath goup. */
@@ -15528,7 +15570,7 @@ void build_lflows(struct lflow_input *input_data,
         }
         ovn_sb_set_lflow_logical_dp_group(ovnsb_txn, dp_groups,
                                           sbflow, lflow->dpg_bitmap,
-                                          datapaths);
+                                          datapaths, false);
 
         sbrec_logical_flow_set_pipeline(sbflow, pipeline);
         sbrec_logical_flow_set_table_id(sbflow, table);
