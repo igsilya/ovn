@@ -689,26 +689,45 @@ run_idl_loop(struct ovsdb_idl_loop *idl_loop, const char *name)
     unsigned long long duration, start = time_msec();
     unsigned int seqno = UINT_MAX;
     struct ovsdb_idl_txn *txn;
-    int n = 0;
+    int n_before_sleep = -1;
+    int n = 0, n_sleeps = 0;
 
     /* Accumulate database changes as long as there are some,
      * but no longer than half a second. */
-    while (seqno != ovsdb_idl_get_seqno(idl_loop->idl)
-           && time_msec() - start < 500) {
-        seqno = ovsdb_idl_get_seqno(idl_loop->idl);
-        ovsdb_idl_run(idl_loop->idl);
-        n++;
+    for (;;) {
+        while (seqno != ovsdb_idl_get_seqno(idl_loop->idl)
+               && time_msec() - start < 500) {
+            seqno = ovsdb_idl_get_seqno(idl_loop->idl);
+            ovsdb_idl_run(idl_loop->idl);
+            n++;
+        }
+        /* If we're not out of time yet, try to sleep for a short 10ms
+         * in case we'll have more updates.  Don't sleep again if there
+         * were no updates after the previous short sleep. */
+        if (n > n_before_sleep + 1 && time_msec() - start < 500) {
+            n_sleeps++;
+            n_before_sleep = n;
+            poll_timer_wait(10);
+            ovsdb_idl_wait(idl_loop->idl);
+            poll_block();
+            /* Reset seqno, so we try to run IDL at least one more time. */
+            seqno = UINT_MAX;
+        } else {
+            /* Out of time or no updates since the last sleep. */
+            break;
+        }
     }
 
     txn = ovsdb_idl_loop_run(idl_loop);
 
     duration = time_msec() - start;
-    /* ovsdb_idl_run() is called at least 2 times.  Once directly and
-     * once in the ovsdb_idl_loop_run().  n > 2 means that we received
+    /* ovsdb_idl_run() is called at least 3 times.  Twice directly and
+     * once in the ovsdb_idl_loop_run().  n > 3 means that we received
      * data on at least 2 subsequent calls. */
-    if (n > 2 || duration > 100) {
+    if (n > 3 || duration > 100 || n_sleeps > 1) {
         VLOG(duration > 500 ? VLL_INFO : VLL_DBG,
-             "%s IDL run: %d iterations in %lld ms", name, n + 1, duration);
+             "%s IDL run: %d iterations with %d sleeps in %lld ms",
+             name, n + 1, n_sleeps, duration);
     }
     return txn;
 }
