@@ -62,6 +62,7 @@
 #include "vswitch-idl.h"
 #include "lflow.h"
 #include "ip-mcast.h"
+#include "mcast-snooping.h"
 
 VLOG_DEFINE_THIS_MODULE(pinctrl);
 
@@ -5473,11 +5474,16 @@ pinctrl_ip_mcast_handle_igmp(struct rconn *swconn,
     ovs_rwlock_wrlock(&ip_ms->ms->rwlock);
     switch (ntohs(ip_flow->tp_src)) {
     case IGMP_HOST_MEMBERSHIP_REPORT:
-    case IGMPV2_HOST_MEMBERSHIP_REPORT:
+    case IGMPV2_HOST_MEMBERSHIP_REPORT: {
+        enum mcast_group_proto grp_proto =
+                (ntohs(ip_flow->tp_src) == IGMP_HOST_MEMBERSHIP_REPORT)
+                ? MCAST_GROUP_IGMPV1
+                : MCAST_GROUP_IGMPV2;
         group_change =
             mcast_snooping_add_group4(ip_ms->ms, ip4, IP_MCAST_VLAN,
-                                      port_key_data);
+                                      port_key_data, grp_proto);
         break;
+    }
     case IGMP_HOST_LEAVE_MESSAGE:
         group_change =
             mcast_snooping_leave_group4(ip_ms->ms, ip4, IP_MCAST_VLAN,
