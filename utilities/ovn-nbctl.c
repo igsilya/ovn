@@ -5261,7 +5261,9 @@ nbctl_lr_nat_add(struct ctl_context *ctx)
         nbrec_nat_set_external_port_range(nat, port_range);
     }
 
-    smap_add(&nat_options, "stateless", stateless ? "true":"false");
+    if (stateless) {
+        smap_add(&nat_options, "stateless", "true");
+    }
     if (add_route) {
         smap_add(&nat_options, "add_route", "true");
     }
