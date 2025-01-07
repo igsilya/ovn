@@ -497,6 +497,85 @@ create_br_datapath(struct ovsdb_idl_txn *ovs_idl_txn,
     return dp;
 }
 
+
+#define N_FLOW_TABLES 255
+#define FLOW_TABLE_PREFIXES_MIN 3
+
+static void
+update_flow_table_prefixes(struct ovsdb_idl_txn *ovs_idl_txn,
+                           const struct ovsrec_bridge *br_int)
+{
+    static size_t tried = FLOW_TABLE_PREFIXES_MIN - 1;
+    static bool done = false;
+
+    const char *prefixes[] = {
+        "ip_src", "ip_dst", "ipv6_src", "ipv6_dst",
+    };
+    struct ovsrec_flow_table *ft;
+    size_t i;
+
+    /* Retry if not configured or the database somehow got cleared.
+     * Any supported version of OVS must support at least the
+     * 'FLOW_TABLE_PREFIXES_MIN' number of prefixes.  */
+    if (br_int->n_flow_tables != N_FLOW_TABLES ||
+        br_int->value_flow_tables[0]->n_prefixes < FLOW_TABLE_PREFIXES_MIN) {
+        tried = FLOW_TABLE_PREFIXES_MIN - 1;
+        done = false;
+    } else if (done) {
+        return;
+    }
+
+    if (tried == ARRAY_SIZE(prefixes)) {
+        struct ds ds = DS_EMPTY_INITIALIZER;
+
+        if (br_int->value_flow_tables[0]->n_prefixes != tried) {
+            VLOG_WARN("Unable to configure more than %"PRIuSIZE
+                      " flow table prefixes.",
+                      br_int->value_flow_tables[0]->n_prefixes);
+        }
+
+        ds_put_cstr(&ds, "Configured flow table prefixes:");
+        for (i = 0 ; i < br_int->value_flow_tables[0]->n_prefixes; i++) {
+            ds_put_char(&ds, ' ');
+            ds_put_cstr(&ds, br_int->value_flow_tables[0]->prefixes[i]);
+            ds_put_char(&ds, ',');
+        }
+        ds_chomp(&ds, ',');
+        VLOG_INFO("%s.", ds_cstr_ro(&ds));
+        ds_destroy(&ds);
+
+        done = true;
+        return;
+    }
+
+    for (i = 1; i < br_int->n_flow_tables; i++) {
+        if (br_int->value_flow_tables[i] != br_int->value_flow_tables[0]) {
+            break;
+        }
+    }
+    if (i == N_FLOW_TABLES) {
+        /* Correct number of flow tables and all pointing to the same row. */
+        ft = br_int->value_flow_tables[0];
+    } else {
+        /* Unexpected configuration.  Let's create a new flow table row.
+         * Old ones will be garbage collected by the database. */
+        struct ovsrec_flow_table *values[N_FLOW_TABLES];
+        int64_t keys[N_FLOW_TABLES];
+
+        ft = ovsrec_flow_table_insert(ovs_idl_txn);
+        for (i = 0; i < ARRAY_SIZE(values); i++) {
+            keys[i] = i;
+            values[i] = ft;
+        }
+        ovsrec_bridge_set_flow_tables(br_int, keys, values,
+                                      ARRAY_SIZE(values));
+    }
+
+    tried++;
+    VLOG_DBG("Trying to enable %"PRIuSIZE" flow table prefixes.", tried);
+    ovsrec_flow_table_set_prefixes(ft, prefixes, tried);
+}
+
 static const struct ovsrec_bridge *
 get_br_int(const struct ovsrec_bridge_table *bridge_table,
            const struct ovsrec_open_vswitch_table *ovs_table)
@@ -573,6 +652,8 @@ process_br_int(struct ovsdb_idl_txn *ovs_idl_txn,
                                                     datapath_type);
                 }
             }
+
+            update_flow_table_prefixes(ovs_idl_txn, br_int);
         }
     }
     *br_int_ = br_int;
@@ -793,8 +874,11 @@ ctrl_register_ovs_idl(struct ovsdb_idl *ovs_idl)
     ovsdb_idl_add_column(ovs_idl, &ovsrec_bridge_col_ports);
     ovsdb_idl_add_column(ovs_idl, &ovsrec_bridge_col_name);
     ovsdb_idl_add_column(ovs_idl, &ovsrec_bridge_col_fail_mode);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_bridge_col_flow_tables);
     ovsdb_idl_add_column(ovs_idl, &ovsrec_bridge_col_other_config);
     ovsdb_idl_add_column(ovs_idl, &ovsrec_bridge_col_external_ids);
+    ovsdb_idl_add_table(ovs_idl, &ovsrec_table_flow_table);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_flow_table_col_prefixes);
     ovsdb_idl_add_table(ovs_idl, &ovsrec_table_ssl);
     ovsdb_idl_add_column(ovs_idl, &ovsrec_ssl_col_bootstrap_ca_cert);
     ovsdb_idl_add_column(ovs_idl, &ovsrec_ssl_col_ca_cert);
