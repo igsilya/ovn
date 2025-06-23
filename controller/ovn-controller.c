@@ -5549,7 +5549,7 @@ garp_rarp_sb_port_binding_handler(struct engine_node *node,
         struct local_datapath *ld = get_local_datapath(
             &rt_data->local_datapaths, pb->datapath->tunnel_key);
 
-        if (!ld || ld->localnet_port) {
+        if (ld && ld->localnet_port) {
             /* XXX: actually handle this incrementally. */
             return EN_UNHANDLED;
         }
