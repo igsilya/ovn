@@ -389,6 +389,7 @@ mac_binding_aging_run_for_datapath(const struct sbrec_datapath_binding *dp,
 enum engine_node_state
 en_mac_binding_aging_run(struct engine_node *node, void *data OVS_UNUSED)
 {
+    const struct engine_context *eng_ctx = engine_get_context();
     struct northd_data *northd_data = engine_get_input_data("northd", node);
     struct ed_type_global_config *global_config =
         engine_get_input_data("global_config", node);
@@ -396,7 +397,8 @@ en_mac_binding_aging_run(struct engine_node *node, void *data OVS_UNUSED)
     struct aging_waker *waker =
         engine_get_input_data("mac_binding_aging_waker", node);
 
-    if (!global_config->features.mac_binding_timestamp ||
+    if (!eng_ctx->ovnsb_idl_txn ||
+        !global_config->features.mac_binding_timestamp ||
         time_msec() < waker->next_wake_msec) {
         return EN_STALE;
     }
@@ -523,12 +525,14 @@ fdb_run_for_datapath(const struct sbrec_datapath_binding *dp,
 enum engine_node_state
 en_fdb_aging_run(struct engine_node *node, void *data OVS_UNUSED)
 {
+    const struct engine_context *eng_ctx = engine_get_context();
     struct northd_data *northd_data = engine_get_input_data("northd", node);
     struct aging_waker *waker = engine_get_input_data("fdb_aging_waker", node);
     struct ed_type_global_config *global_config =
         engine_get_input_data("global_config", node);
 
-    if (!global_config->features.fdb_timestamp ||
+    if (!eng_ctx->ovnsb_idl_txn ||
+        !global_config->features.fdb_timestamp ||
         time_msec() < waker->next_wake_msec) {
         return EN_STALE;
     }
