@@ -60,6 +60,9 @@
 VLOG_DEFINE_THIS_MODULE(ofctrl);
 
 COVERAGE_DEFINE(ofctrl_msg_too_long);
+COVERAGE_DEFINE(of_msg_count);
+COVERAGE_DEFINE(of_msg_bytes);
+COVERAGE_DEFINE(of_msg_buffer_flush);
 
 /* An OpenFlow flow. */
 struct ovn_flow {
@@ -902,6 +905,35 @@ queue_msg(struct ofpbuf *msg)
     ovs_be32 xid_ = oh->xid;
     rconn_send(swconn, msg, tx_counter);
     return xid_;
+}
+
+#define MSG_BUFFER_SIZE 16384
+static uint64_t msg_stub[MSG_BUFFER_SIZE / 8];
+static struct ofpbuf msg_buffer = OFPBUF_STUB_INITIALIZER(msg_stub);
+
+static void
+flush_msg_buffer(void)
+{
+    COVERAGE_INC(of_msg_buffer_flush);
+    queue_msg(ofpbuf_clone(&msg_buffer));
+    ofpbuf_clear(&msg_buffer);
+}
+
+static void
+queue_msg_buffered(struct ofpbuf *msg)
+{
+    COVERAGE_INC(of_msg_count);
+    COVERAGE_ADD(of_msg_bytes, msg->size);
+
+    if (msg->size > ofpbuf_tailroom(&msg_buffer)) {
+        flush_msg_buffer();
+        if (msg->size > ofpbuf_tailroom(&msg_buffer)) {
+            queue_msg(msg);
+            return;
+        }
+    }
+    ofpbuf_put(&msg_buffer, msg->data, msg->size);
+    ofpbuf_delete(msg);
 }
 
 static void
@@ -2982,8 +3014,9 @@ ofctrl_put(struct ovn_desired_flow_table *lflow_table,
         /* Queue the messages. */
         struct ofpbuf *msg;
         LIST_FOR_EACH_POP (msg, list_node, &msgs) {
-            queue_msg(msg);
+            queue_msg_buffered(msg);
         }
+        flush_msg_buffer();
 
         /* Store the barrier's xid with any newly sent ct flushes. */
         SHASH_FOR_EACH(iter, pending_ct_zones) {
