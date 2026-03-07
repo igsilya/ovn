@@ -274,6 +274,8 @@ static struct desired_flow *desired_flow_lookup_conjunctive(
     struct ovn_desired_flow_table *,
     const struct ovn_flow *target);
 static void desired_flow_destroy(struct desired_flow *);
+static bool flow_lookup_match_uuid_cb(const struct desired_flow *,
+                                      const void *arg);
 
 static struct installed_flow *installed_flow_lookup(
     const struct ovn_flow *target, struct hmap *installed_flows);
@@ -1398,14 +1400,12 @@ ofctrl_add_or_append_conj_flow(struct ovn_desired_flow_table *desired_flows,
          * actions properly when handle addrset ip deletion, instead of simply
          * delete the flow. */
         struct sb_flow_ref *sfr;
-        bool duplicate = false;
         HMAP_FOR_EACH (sfr, sb_node, &f->references) {
-            duplicate |= uuid_equals(&sfr->sb_uuid, sb_uuid);
             ovs_list_remove(&sfr->as_ip_flow_list);
             ovs_list_init(&sfr->as_ip_flow_list);
         }
 
-        if (duplicate) {
+        if (flow_lookup_match_uuid_cb(f, sb_uuid)) {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
             char *s = ovn_flow_to_string(&f->flow);
             VLOG_WARN_RL(&rl, "lflow "UUID_FMT" already references desired "
