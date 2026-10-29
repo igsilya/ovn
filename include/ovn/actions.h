@@ -1006,6 +1006,15 @@ struct ovnact_encode_params {
                                   * to resubmit. */
     uint32_t ct_state_save_table; /* OpenFlow table for saving ct_state to
                                    * register. */
+
+    /* If nonnull, set to true when the encoded actions depend on the
+     * datapath specific parameters 'dp_key' or 'common_nat_ct_zone'. */
+    bool *dp_specific;
+
+    /* If true, the bits of the logical datapath field above OVN_DP_KEY_BITS
+     * carry datapath group bits, so learned flows must match only on the
+     * datapath key bits. */
+    bool dp_key_bits_only;
 };
 
 void ovnacts_encode(const struct ovnact[], size_t ovnacts_len,

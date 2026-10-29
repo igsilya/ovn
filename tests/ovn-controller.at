@@ -4610,3 +4610,158 @@ OVN_CLEANUP([hv2], [hv1
 /No encap type and\/or ip on chassis 'hv1'. Deleting chassis/d])
 AT_CLEANUP
 ])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-controller - OpenFlow datapath groups])
+AT_KEYWORDS([of-dp-groups])
+ovn_start
+
+net_add n1
+sim_add hv1
+as hv1
+check ovs-vsctl add-br br-phys
+ovn_attach n1 br-phys 192.168.0.1
+
+# Each logical switch ls<i> has two VIFs and is connected to its own logical
+# router lr<i>, so that there are datapath groups of switches and of routers.
+add_net() {
+    local i=$1
+    check ovn-nbctl ls-add ls$i
+    check ovn-nbctl lr-add lr$i
+    check ovn-nbctl lrp-add lr$i lr$i-ls$i 00:00:00:00:0$i:ff 10.0.$i.254/24
+    check ovn-nbctl lsp-add-router-port ls$i ls$i-lr$i lr$i-ls$i
+    for j in 1 2; do
+        check ovn-nbctl lsp-add ls$i lsp$i-$j \
+            -- lsp-set-addresses lsp$i-$j "00:00:00:00:0$i:0$j 10.0.$i.$j"
+        check ovs-vsctl add-port br-int vif$i-$j \
+            -- set interface vif$i-$j external-ids:iface-id=lsp$i-$j \
+               ofport-request=$i$j
+    done
+}
+
+# Prints the datapath actions of a few packets in network $1.
+trace_net() {
+    local i=$1
+    for pkt in \
+        "dl_src=00:00:00:00:0$i:01,dl_dst=00:00:00:00:0$i:02" \
+        "dl_src=00:00:00:00:0$i:01,dl_dst=ff:ff:ff:ff:ff:ff" \
+        "arp,dl_src=00:00:00:00:0$i:01,dl_dst=ff:ff:ff:ff:ff:ff,arp_op=1,arp_spa=10.0.$i.1,arp_tpa=10.0.$i.254,arp_sha=00:00:00:00:0$i:01" \
+        "icmp,dl_src=00:00:00:00:0$i:01,dl_dst=00:00:00:00:0$i:ff,nw_src=10.0.$i.1,nw_dst=10.0.$i.254,nw_ttl=64,icmp_type=8,icmp_code=0"; do
+        echo "$pkt"
+        as hv1 ovs-appctl ofproto/trace br-int in_port=${i}1,$pkt \
+            | grep "^Datapath actions"
+    done
+}
+
+dump_flows() {
+    as hv1 ovs-ofctl --no-stats dump-flows br-int \
+        | sed 's/cookie=0x[[0-9a-f]]*, //' | sort
+}
+
+for i in 1 2; do
+    add_net $i
+done
+wait_for_ports_up
+check ovn-nbctl --wait=hv sync
+
+dump_flows > flows-off
+for i in 1 2; do
+    trace_net $i
+done > trace-off
+
+check ovs-vsctl set open . external_ids:ovn-openflow-dp-groups=true
+OVS_WAIT_UNTIL([test $(as hv1 ovs-ofctl dump-flows br-int \
+                       table=OFTABLE_LOG_INGRESS_DP_GROUPS | grep -c priority=100) = 4])
+check ovn-nbctl --wait=hv sync
+
+# All datapaths get group bits, both on ingress and egress.
+for t in OFTABLE_LOG_INGRESS_DP_GROUPS OFTABLE_LOG_EGRESS_DP_GROUPS; do
+    AT_CHECK([as hv1 ovs-ofctl dump-flows br-int table=$t | grep -c priority=100], [0], [4
+])
+    AT_CHECK([as hv1 ovs-ofctl dump-flows br-int table=$t | grep -c "priority=0 actions=load:0->OXM_OF_METADATA\[[24..63\]]"], [0], [1
+])
+done
+
+# Flows shared by the datapath groups match on a group bit, and there are
+# fewer flows in total.
+dump_flows > flows-on
+AT_CHECK([grep -q "metadata=0x1000000/0x1000000" flows-on])
+AT_CHECK([grep -q "metadata=0x2000000/0x2000000" flows-on])
+AT_CHECK([test $(wc -l < flows-on) -lt $(wc -l < flows-off)])
+# Datapath specific flows match only on the datapath key bits.
+AT_CHECK([grep "metadata=0x[[0-9a-f]]*[[,]]" flows-on], [1])
+
+# Forwarding doesn't change.
+for i in 1 2; do
+    trace_net $i
+done > trace-on
+AT_CHECK([diff -u trace-off trace-on])
+
+# Incremental processing gives the same flows as a full recompute, also when
+# a datapath group gets new local datapaths.
+add_net 3
+wait_for_ports_up
+check ovn-nbctl --wait=hv sync
+dump_flows > flows-ip
+check as hv1 ovn-appctl -t ovn-controller recompute
+check ovn-nbctl --wait=hv sync
+dump_flows > flows-recompute
+AT_CHECK([diff -u flows-ip flows-recompute])
+AT_CHECK([as hv1 ovs-ofctl dump-flows br-int table=OFTABLE_LOG_INGRESS_DP_GROUPS | grep -c priority=100], [0], [6
+])
+for i in 1 2 3; do
+    trace_net $i
+done > trace-on
+
+check ovn-nbctl lsp-del lsp3-2
+check ovn-nbctl --wait=hv sync
+dump_flows > flows-ip
+check as hv1 ovn-appctl -t ovn-controller recompute
+check ovn-nbctl --wait=hv sync
+dump_flows > flows-recompute
+AT_CHECK([diff -u flows-ip flows-recompute])
+check ovn-nbctl lsp-add ls3 lsp3-2 \
+    -- lsp-set-addresses lsp3-2 "00:00:00:00:03:02 10.0.3.2"
+wait_for_ports_up
+check ovn-nbctl --wait=hv sync
+
+# Without any bits available all datapath groups are expanded.
+check ovs-vsctl set open . external_ids:ovn-openflow-dp-groups-max-bits=0
+OVS_WAIT_UNTIL([test $(as hv1 ovs-ofctl dump-flows br-int \
+                       table=OFTABLE_LOG_INGRESS_DP_GROUPS | grep -c priority=100) = 0])
+check ovn-nbctl --wait=hv sync
+AT_CHECK([as hv1 ovs-ofctl dump-flows br-int | grep -c "metadata=0x[[0-9a-f]]*000000/"], [1], [0
+])
+for i in 1 2 3; do
+    trace_net $i
+done > trace-expanded
+AT_CHECK([diff -u trace-on trace-expanded])
+
+# With a single bit only one group is shared.
+check ovs-vsctl set open . external_ids:ovn-openflow-dp-groups-max-bits=1
+OVS_WAIT_UNTIL([test $(as hv1 ovs-ofctl dump-flows br-int \
+                       table=OFTABLE_LOG_INGRESS_DP_GROUPS | grep -c priority=100) = 3])
+check ovn-nbctl --wait=hv sync
+dump_flows > flows-one-bit
+AT_CHECK([grep -q "metadata=0x1000000/0x1000000" flows-one-bit])
+AT_CHECK([grep -c "metadata=0x2000000/0x2000000" flows-one-bit], [1], [0
+])
+for i in 1 2 3; do
+    trace_net $i
+done > trace-one-bit
+AT_CHECK([diff -u trace-on trace-one-bit])
+
+# Disabling the feature restores the original flows.
+check ovs-vsctl remove open . external_ids ovn-openflow-dp-groups-max-bits
+check ovn-nbctl lsp-del lsp3-1 -- lsp-del lsp3-2 -- ls-del ls3 -- lr-del lr3
+check ovs-vsctl del-port vif3-1 -- del-port vif3-2
+check ovs-vsctl set open . external_ids:ovn-openflow-dp-groups=false
+OVS_WAIT_UNTIL([test $(as hv1 ovs-ofctl dump-flows br-int \
+                       table=OFTABLE_LOG_INGRESS_DP_GROUPS | wc -l) = 1])
+check ovn-nbctl --wait=hv sync
+dump_flows > flows-off2
+AT_CHECK([diff -u flows-off flows-off2])
+
+OVN_CLEANUP([hv1])
+AT_CLEANUP
+])

@@ -361,7 +361,7 @@ mac_binding_stats_process_flow_stats(struct vector *stats_vec,
             /* The port_key must be zero to match
              * mac_binding_data_from_sbrec. */
             .port_key = 0,
-            .dp_key = ntohll(ofp_stats->match.flow.metadata),
+            .dp_key = ntohll(ofp_stats->match.flow.metadata) & OVN_DP_KEY_MASK,
             .mac = ofp_stats->match.flow.dl_src
         },
     };
@@ -504,7 +504,7 @@ fdb_stats_process_flow_stats(struct vector *stats_vec,
                        : 0,
         .data.fdb = (struct fdb_data) {
             .port_key = ofp_stats->match.flow.regs[MFF_LOG_INPORT - MFF_REG0],
-            .dp_key = ntohll(ofp_stats->match.flow.metadata),
+            .dp_key = ntohll(ofp_stats->match.flow.metadata) & OVN_DP_KEY_MASK,
             .mac = ofp_stats->match.flow.dl_src
         },
     };
@@ -946,7 +946,7 @@ mac_binding_probe_stats_process_flow_stats(
             /* The port_key must be zero to match
              * mac_binding_data_from_sbrec. */
             .port_key = 0,
-            .dp_key = ntohll(ofp_stats->match.flow.metadata),
+            .dp_key = ntohll(ofp_stats->match.flow.metadata) & OVN_DP_KEY_MASK,
             .mac = ofp_stats->match.flow.dl_src
         },
     };

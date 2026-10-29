@@ -36,6 +36,7 @@
 #include "lib/extend-table.h"
 #include "lib/uuidset.h"
 #include "neighbor-of.h"
+#include "of-dp-groups.h"
 #include "packets.h"
 #include "physical.h"
 #include "simap.h"
@@ -74,6 +75,9 @@ struct lookup_port_aux {
     struct objdep_mgr *deps_mgr;
     const struct hmap *chassis_tunnels;
     const struct shash *local_bindings;
+
+    /* Set to true if a lookup depended on 'dp'. */
+    bool dp_dependent;
 };
 
 struct condition_aux {
@@ -94,12 +98,21 @@ convert_match_to_expr(const struct sbrec_logical_flow *,
                       const struct shash *port_groups,
                       const struct smap *template_vars,
                       struct sset *template_vars_ref,
-                      struct objdep_mgr *, bool *pg_addr_set_ref);
+                      struct objdep_mgr *, bool *pg_addr_set_ref,
+                      bool *pg_ref);
+static uint32_t
+encode_lflow_actions(const struct sbrec_logical_flow *,
+                     const struct local_datapath *,
+                     const struct ofpbuf *ovnacts, bool ingress,
+                     struct lookup_port_aux *, struct lflow_ctx_in *,
+                     struct lflow_ctx_out *, struct ofpbuf *ofpacts,
+                     bool *dp_specific);
 static void
 add_matches_to_flow_table(const struct sbrec_logical_flow *,
                           const struct local_datapath *,
                           struct hmap *matches, uint8_t ptable,
-                          uint8_t output_ptable, struct ofpbuf *ovnacts,
+                          const struct ofpbuf *ofpacts,
+                          uint32_t ctrl_meter_id, uint64_t dp_group_bit,
                           bool ingress, struct lflow_ctx_in *,
                           struct lflow_ctx_out *);
 static void
@@ -128,6 +141,7 @@ lookup_port_cb(const void *aux_, const char *port_name, unsigned int *portp)
     }
 
     const struct lookup_port_aux *aux = aux_;
+    CONST_CAST(struct lookup_port_aux *, aux)->dp_dependent = true;
 
     /* Store the name that used to lookup the lport to lflow reference, so that
      * in the future when the lport's port binding changes, the logical flow
@@ -181,6 +195,7 @@ static bool
 tunnel_ofport_cb(const void *aux_, const char *port_name, ofp_port_t *ofport)
 {
     const struct lookup_port_aux *aux = aux_;
+    CONST_CAST(struct lookup_port_aux *, aux)->dp_dependent = true;
 
     const struct sbrec_port_binding *pb
         = lport_lookup_by_name(aux->sbrec_port_binding_by_name, port_name);
@@ -296,6 +311,8 @@ lflow_handle_changed_flows(struct lflow_ctx_in *l_ctx_in,
         objdep_mgr_remove_obj(l_ctx_out->lflow_deps_mgr, &ofrn->uuid);
         /* Delete conj_ids owned by the lflow. */
         lflow_conj_ids_free(l_ctx_out->conj_ids, &ofrn->uuid);
+        uuidset_find_and_delete(&l_ctx_out->dp_groups->shared_lflows,
+                                &ofrn->uuid);
         /* Reprocessing the lflow if the sb record is not deleted. */
         lflow = sbrec_logical_flow_table_get_for_uuid(
             l_ctx_in->logical_flow_table, &ofrn->uuid);
@@ -451,9 +468,6 @@ consider_lflow_for_added_as_ips__(
                             ? OFTABLE_LOG_INGRESS_PIPELINE
                             : OFTABLE_LOG_EGRESS_PIPELINE);
     uint8_t ptable = first_ptable + lflow->table_id;
-    uint8_t output_ptable = (ingress
-                             ? OFTABLE_OUTPUT_INIT
-                             : OFTABLE_SAVE_INPORT);
 
     uint64_t ovnacts_stub[1024 / 8];
     struct ofpbuf ovnacts = OFPBUF_STUB_INITIALIZER(ovnacts_stub);
@@ -477,6 +491,8 @@ consider_lflow_for_added_as_ips__(
         .dp = dp,
         .lflow = lflow,
         .deps_mgr = l_ctx_out->lflow_deps_mgr,
+        .chassis_tunnels = l_ctx_in->chassis_tunnels,
+        .local_bindings = l_ctx_in->lbinding_lports,
     };
     struct condition_aux cond_aux = {
         .sbrec_port_binding_by_name = l_ctx_in->sbrec_port_binding_by_name,
@@ -535,7 +551,8 @@ consider_lflow_for_added_as_ips__(
                                               l_ctx_in->port_groups,
                                               l_ctx_in->template_vars,
                                               &template_vars_ref,
-                                              l_ctx_out->lflow_deps_mgr, NULL);
+                                              l_ctx_out->lflow_deps_mgr, NULL,
+                                              NULL);
     shash_replace((struct shash *)l_ctx_in->addr_sets, as_name, real_as);
     if (new_fake_as) {
         expr_constant_set_destroy(new_fake_as);
@@ -599,8 +616,15 @@ consider_lflow_for_added_as_ips__(
         }
         expr_matches_prepare(&matches, start_conj_id - 1);
     }
-    add_matches_to_flow_table(lflow, ldp, &matches, ptable, output_ptable,
-                              &ovnacts, ingress, l_ctx_in, l_ctx_out);
+
+    uint64_t ofpacts_stub[1024 / 8];
+    struct ofpbuf ofpacts = OFPBUF_STUB_INITIALIZER(ofpacts_stub);
+    uint32_t ctrl_meter_id = encode_lflow_actions(lflow, ldp, &ovnacts,
+                                                  ingress, &aux, l_ctx_in,
+                                                  l_ctx_out, &ofpacts, NULL);
+    add_matches_to_flow_table(lflow, ldp, &matches, ptable, &ofpacts,
+                              ctrl_meter_id, 0, ingress, l_ctx_in, l_ctx_out);
+    ofpbuf_uninit(&ofpacts);
 done:
     expr_destroy(prereqs);
     ovnacts_free(ovnacts.data, ovnacts.size);
@@ -633,6 +657,13 @@ consider_lflow_for_added_as_ips(
         return true;
     }
     ovs_assert(!dp_group || !dp);
+
+    if (dp_group && uuidset_contains(&l_ctx_out->dp_groups->shared_lflows,
+                                     &lflow->header_.uuid)) {
+        /* The flows are shared by the whole datapath group, just reprocess
+         * the lflow. */
+        return false;
+    }
 
     if (dp) {
         return consider_lflow_for_added_as_ips__(lflow, dp, as_name,
@@ -799,34 +830,35 @@ done:
     return ret;
 }
 
-bool
-lflow_handle_changed_ref(enum objdep_type type, const char *res_name,
-                         struct uuidset *objs_todo,
-                         const void *in_arg, void *out_arg)
+/* Flood removes the flows of the lflows in 'objs_todo' and reprocesses them.
+ * If 'drop_cache' is true, cached translations of the lflows are dropped
+ * too. */
+static void
+lflow_reprocess(struct uuidset *objs_todo, bool drop_cache,
+                struct lflow_ctx_in *l_ctx_in,
+                struct lflow_ctx_out *l_ctx_out)
 {
-    struct lflow_ctx_in *l_ctx_in = CONST_CAST(struct lflow_ctx_in *, in_arg);
-    struct lflow_ctx_out *l_ctx_out = out_arg;
-
-    /* Re-parse the related lflows. */
     /* Firstly, flood remove the flows from desired flow table. */
     ofctrl_flood_remove_flows(l_ctx_out->flow_table, objs_todo);
 
     /* Secondly, for each lflow that is actually removed, reprocessing it. */
     struct uuidset_node *ofrn;
     UUIDSET_FOR_EACH (ofrn, objs_todo) {
-        VLOG_DBG("Reprocess lflow "UUID_FMT" for resource type: %s, name: %s.",
-                 UUID_ARGS(&ofrn->uuid), objdep_type_name(type), res_name);
+        VLOG_DBG("Reprocess lflow "UUID_FMT, UUID_ARGS(&ofrn->uuid));
         objdep_mgr_remove_obj(l_ctx_out->lflow_deps_mgr, &ofrn->uuid);
         lflow_conj_ids_free(l_ctx_out->conj_ids, &ofrn->uuid);
+        uuidset_find_and_delete(&l_ctx_out->dp_groups->shared_lflows,
+                                &ofrn->uuid);
+        if (drop_cache) {
+            lflow_cache_delete(l_ctx_out->lflow_cache, &ofrn->uuid);
+        }
 
         const struct sbrec_logical_flow *lflow =
             sbrec_logical_flow_table_get_for_uuid(l_ctx_in->logical_flow_table,
                                                   &ofrn->uuid);
         if (!lflow) {
-            VLOG_DBG("lflow "UUID_FMT" not found while reprocessing for"
-                     " resource type: %s, name: %s.",
-                     UUID_ARGS(&ofrn->uuid),
-                     objdep_type_name(type), res_name);
+            VLOG_DBG("lflow "UUID_FMT" not found while reprocessing.",
+                     UUID_ARGS(&ofrn->uuid));
             continue;
         }
 
@@ -842,6 +874,20 @@ lflow_handle_changed_ref(enum objdep_type type, const char *res_name,
 
         consider_logical_flow(lflow, false, l_ctx_in, l_ctx_out);
     }
+}
+
+bool
+lflow_handle_changed_ref(enum objdep_type type, const char *res_name,
+                         struct uuidset *objs_todo,
+                         const void *in_arg, void *out_arg)
+{
+    struct lflow_ctx_in *l_ctx_in = CONST_CAST(struct lflow_ctx_in *, in_arg);
+    struct lflow_ctx_out *l_ctx_out = out_arg;
+
+    /* Re-parse the related lflows. */
+    VLOG_DBG("Reprocess lflows for resource type: %s, name: %s.",
+             objdep_type_name(type), res_name);
+    lflow_reprocess(objs_todo, false, l_ctx_in, l_ctx_out);
 
     uuidset_destroy(objs_todo);
     return true;
@@ -885,25 +931,21 @@ get_common_nat_zone(const struct local_datapath *ldp)
     }
 }
 
-static void
-add_matches_to_flow_table(const struct sbrec_logical_flow *lflow,
-                          const struct local_datapath *ldp,
-                          struct hmap *matches, uint8_t ptable,
-                          uint8_t output_ptable, struct ofpbuf *ovnacts,
-                          bool ingress, struct lflow_ctx_in *l_ctx_in,
-                          struct lflow_ctx_out *l_ctx_out)
+/* Encodes the logical actions 'ovnacts' of 'lflow' for datapath 'ldp' into
+ * 'ofpacts' and returns the controller meter id to use for the flows.
+ *
+ * If 'dp_specific' is nonnull, sets it to true if the encoded actions depend
+ * on datapath specific parameters other than port lookups, which are tracked
+ * in 'aux'. */
+static uint32_t
+encode_lflow_actions(const struct sbrec_logical_flow *lflow,
+                     const struct local_datapath *ldp,
+                     const struct ofpbuf *ovnacts, bool ingress,
+                     struct lookup_port_aux *aux,
+                     struct lflow_ctx_in *l_ctx_in,
+                     struct lflow_ctx_out *l_ctx_out,
+                     struct ofpbuf *ofpacts, bool *dp_specific)
 {
-    struct lookup_port_aux aux = {
-        .sbrec_multicast_group_by_name_datapath
-            = l_ctx_in->sbrec_multicast_group_by_name_datapath,
-        .sbrec_port_binding_by_name = l_ctx_in->sbrec_port_binding_by_name,
-        .dp = ldp->datapath,
-        .lflow = lflow,
-        .deps_mgr = l_ctx_out->lflow_deps_mgr,
-        .chassis_tunnels = l_ctx_in->chassis_tunnels,
-        .local_bindings = l_ctx_in->lbinding_lports,
-    };
-
     /* Parse any meter to be used if this flow should punt packets to
      * controller.
      */
@@ -912,13 +954,11 @@ add_matches_to_flow_table(const struct sbrec_logical_flow *lflow,
                            &ctrl_meter_id);
 
     /* Encode OVN logical actions into OpenFlow. */
-    uint64_t ofpacts_stub[1024 / 8];
-    struct ofpbuf ofpacts = OFPBUF_STUB_INITIALIZER(ofpacts_stub);
     struct ovnact_encode_params ep = {
         .lookup_port = lookup_port_cb,
         .lookup_local_port = lookup_local_port_cb,
         .tunnel_ofport = tunnel_ofport_cb,
-        .aux = &aux,
+        .aux = aux,
         .is_switch = ldp->is_switch,
         .group_table = l_ctx_out->group_table,
         .meter_table = l_ctx_out->meter_table,
@@ -929,7 +969,7 @@ add_matches_to_flow_table(const struct sbrec_logical_flow *lflow,
         .pipeline = ingress ? OVNACT_P_INGRESS : OVNACT_P_EGRESS,
         .ingress_ptable = OFTABLE_LOG_INGRESS_PIPELINE,
         .egress_ptable = OFTABLE_LOG_EGRESS_PIPELINE,
-        .output_ptable = output_ptable,
+        .output_ptable = ingress ? OFTABLE_OUTPUT_INIT : OFTABLE_SAVE_INPORT,
         .mac_bind_ptable = OFTABLE_MAC_BINDING,
         .mac_lookup_ptable = OFTABLE_MAC_LOOKUP,
         .lb_hairpin_ptable = OFTABLE_CHK_LB_HAIRPIN,
@@ -950,20 +990,61 @@ add_matches_to_flow_table(const struct sbrec_logical_flow *lflow,
         .evpn_arp_ptable = OFTABLE_EVPN_ARP_LOOKUP,
         .ctrl_meter_id = ctrl_meter_id,
         .common_nat_ct_zone = get_common_nat_zone(ldp),
+        .dp_specific = dp_specific,
+        .dp_key_bits_only = of_dp_groups_enabled(),
     };
-    ovnacts_encode(ovnacts->data, ovnacts->size, &ep, &ofpacts);
+    ovnacts_encode(ovnacts->data, ovnacts->size, &ep, ofpacts);
 
+    return ctrl_meter_id;
+}
+
+/* Returns true if any of the 'matches' of a logical switch flow matches on a
+ * logical port, i.e., if the flows might be skipped for non-local ports. */
+static bool
+matches_have_lport(const struct hmap *matches, bool ingress)
+{
+    unsigned int reg_index
+        = (ingress ? MFF_LOG_INPORT : MFF_LOG_OUTPORT) - MFF_REG0;
+    const struct expr_match *m;
+
+    HMAP_FOR_EACH (m, hmap_node, matches) {
+        if (m->match.flow.regs[reg_index]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Adds flows for 'matches' with actions 'ofpacts' to the desired flow table.
+ * If 'dp_group_bit' is nonzero the flows are shared by all datapaths of the
+ * datapath group of 'lflow' and match on that bit instead of on the key of
+ * datapath 'ldp'. */
+static void
+add_matches_to_flow_table(const struct sbrec_logical_flow *lflow,
+                          const struct local_datapath *ldp,
+                          struct hmap *matches, uint8_t ptable,
+                          const struct ofpbuf *ofpacts,
+                          uint32_t ctrl_meter_id, uint64_t dp_group_bit,
+                          bool ingress, struct lflow_ctx_in *l_ctx_in,
+                          struct lflow_ctx_out *l_ctx_out)
+{
     struct expr_match *m;
     HMAP_FOR_EACH (m, hmap_node, matches) {
         int64_t dp_id = ldp->datapath->tunnel_key;
-        match_set_metadata(&m->match, htonll(dp_id));
-        if (ldp->is_switch) {
-            unsigned int reg_index
-                = (ingress ? MFF_LOG_INPORT : MFF_LOG_OUTPORT) - MFF_REG0;
-            int64_t port_id = m->match.flow.regs[reg_index];
-            if (port_id && !lport_id_is_local(l_ctx_in, &lflow->header_.uuid,
-                                              dp_id, port_id)) {
-                continue;
+        if (dp_group_bit) {
+            match_set_metadata_masked(&m->match, htonll(dp_group_bit),
+                                      htonll(dp_group_bit));
+        } else {
+            ovn_match_set_dp_key(&m->match, dp_id);
+            if (ldp->is_switch) {
+                unsigned int reg_index
+                    = (ingress ? MFF_LOG_INPORT : MFF_LOG_OUTPORT) - MFF_REG0;
+                int64_t port_id = m->match.flow.regs[reg_index];
+                if (port_id
+                    && !lport_id_is_local(l_ctx_in, &lflow->header_.uuid,
+                                          dp_id, port_id)) {
+                    continue;
+                }
             }
         }
 
@@ -976,7 +1057,7 @@ add_matches_to_flow_table(const struct sbrec_logical_flow *lflow,
             ofctrl_add_flow_metered(l_ctx_out->flow_table, ptable,
                                     lflow->priority,
                                     lflow->header_.uuid.parts[0], &m->match,
-                                    &ofpacts, &lflow->header_.uuid,
+                                    ofpacts, &lflow->header_.uuid,
                                     ctrl_meter_id,
                                     as_info.name ? &as_info : NULL);
         } else {
@@ -990,8 +1071,6 @@ add_matches_to_flow_table(const struct sbrec_logical_flow *lflow,
                                            as_info.name ? &as_info : NULL);
         }
     }
-
-    ofpbuf_uninit(&ofpacts);
 }
 
 /* Converts the match and returns the simplified expr tree.
@@ -1008,7 +1087,8 @@ convert_match_to_expr(const struct sbrec_logical_flow *lflow,
                       const struct smap *template_vars,
                       struct sset *template_vars_ref,
                       struct objdep_mgr *mgr,
-                      bool *pg_addr_set_ref)
+                      bool *pg_addr_set_ref,
+                      bool *pg_ref)
 {
     struct shash addr_sets_ref = SHASH_INITIALIZER(&addr_sets_ref);
     struct sset port_groups_ref = SSET_INITIALIZER(&port_groups_ref);
@@ -1054,6 +1134,10 @@ convert_match_to_expr(const struct sbrec_logical_flow *lflow,
         *pg_addr_set_ref = (!sset_is_empty(&port_groups_ref) ||
                             !shash_is_empty(&addr_sets_ref));
     }
+    if (pg_ref) {
+        /* Port groups are specific to the datapath. */
+        *pg_ref = !sset_is_empty(&port_groups_ref);
+    }
     shash_destroy_free_data(&addr_sets_ref);
     sset_destroy(&port_groups_ref);
 
@@ -1076,9 +1160,31 @@ convert_match_to_expr(const struct sbrec_logical_flow *lflow,
     return expr_simplify(e);
 }
 
-static void
+/* Result of translating a logical flow of a datapath group for one of its
+ * datapaths. */
+enum lflow_dpg_result {
+    /* The flow was skipped for the datapath before it was known whether its
+     * translation depends on the datapath. */
+    LFLOW_DPG_SKIPPED,
+
+    /* The OpenFlow flows, if any, were added for this datapath only. */
+    LFLOW_DPG_EXPANDED,
+
+    /* The OpenFlow flows, if any, were added for all the datapaths of the
+     * group, i.e., they match on 'dp_group_bit'. */
+    LFLOW_DPG_SHARED,
+};
+
+/* Translates 'lflow' into OpenFlow flows for datapath 'dp'.
+ *
+ * If 'dp_group_bit' is nonzero, 'dp' belongs to the datapath group of
+ * 'lflow', which got that bit assigned.  If the translation doesn't depend on
+ * the specific datapath, the flows are added once for the whole group
+ * matching on the bit, and LFLOW_DPG_SHARED is returned. */
+static enum lflow_dpg_result
 consider_logical_flow__(const struct sbrec_logical_flow *lflow,
                         const struct sbrec_datapath_binding *dp,
+                        uint64_t dp_group_bit,
                         struct lflow_ctx_in *l_ctx_in,
                         struct lflow_ctx_out *l_ctx_out)
 {
@@ -1087,7 +1193,7 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
     if (!ldp) {
         VLOG_DBG("Skip lflow "UUID_FMT" for non-local datapath %"PRId64,
                  UUID_ARGS(&lflow->header_.uuid), dp->tunnel_key);
-        return;
+        return LFLOW_DPG_SKIPPED;
     }
 
     const char *io_port = smap_get(&lflow->tags, "in_out_port");
@@ -1100,12 +1206,14 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
         if (!pb) {
             VLOG_DBG("lflow "UUID_FMT" matches inport/outport %s that's not "
                      "found, skip", UUID_ARGS(&lflow->header_.uuid), io_port);
-            return;
+            return LFLOW_DPG_EXPANDED;
         }
         if (!lport_id_is_local(l_ctx_in, &lflow->header_.uuid,
                                dp->tunnel_key, pb->tunnel_key)) {
-            return;
+            return LFLOW_DPG_EXPANDED;
         }
+        /* The port is specific to the datapath. */
+        dp_group_bit = 0;
     }
 
     /* Determine translation of logical table IDs to physical table IDs. */
@@ -1116,9 +1224,6 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
                             ? OFTABLE_LOG_INGRESS_PIPELINE
                             : OFTABLE_LOG_EGRESS_PIPELINE);
     uint8_t ptable = first_ptable + lflow->table_id;
-    uint8_t output_ptable = (ingress
-                             ? OFTABLE_OUTPUT_INIT
-                             : OFTABLE_SAVE_INPORT);
 
     /* Parse OVN logical actions.
      *
@@ -1135,7 +1240,7 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
         store_lflow_template_refs(l_ctx_out->lflow_deps_mgr,
                                   &template_vars_ref, lflow);
         sset_destroy(&template_vars_ref);
-        return;
+        return LFLOW_DPG_SKIPPED;
     }
 
     struct lookup_port_aux aux = {
@@ -1145,6 +1250,8 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
         .dp = dp,
         .lflow = lflow,
         .deps_mgr = l_ctx_out->lflow_deps_mgr,
+        .chassis_tunnels = l_ctx_in->chassis_tunnels,
+        .local_bindings = l_ctx_in->lbinding_lports,
     };
     struct condition_aux cond_aux = {
         .sbrec_port_binding_by_name = l_ctx_in->sbrec_port_binding_by_name,
@@ -1154,6 +1261,13 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
         .lflow = lflow,
         .deps_mgr = l_ctx_out->lflow_deps_mgr,
     };
+
+    uint64_t ofpacts_stub[1024 / 8];
+    struct ofpbuf ofpacts = OFPBUF_STUB_INITIALIZER(ofpacts_stub);
+    bool actions_encoded = false;
+    uint32_t ctrl_meter_id = NX_CTLR_NO_METER;
+    bool shared = false;
+    enum lflow_dpg_result result = LFLOW_DPG_SKIPPED;
 
     struct lflow_cache_value *lcv =
         lflow_cache_get(l_ctx_out->lflow_cache, &lflow->header_.uuid);
@@ -1165,21 +1279,9 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
     size_t matches_size = 0;
 
     bool pg_addr_set_ref = false;
+    bool pg_ref = false;
 
-    if (lcv_type == LCACHE_T_MATCHES
-        && lcv->n_conjs
-        && !lflow_conj_ids_alloc_specified(l_ctx_out->conj_ids,
-                                           &lflow->header_.uuid,
-                                           &dp->header_.uuid,
-                                           lcv->conj_id_ofs, lcv->n_conjs)) {
-        /* This should happen very rarely. */
-        VLOG_DBG("lflow "UUID_FMT" match cached with conjunctions, but the"
-                 " cached ids are not available anymore. Drop the cache.",
-                 UUID_ARGS(&lflow->header_.uuid));
-        lflow_cache_delete(l_ctx_out->lflow_cache, &lflow->header_.uuid);
-        lcv_type = LCACHE_T_NONE;
-    }
-
+retry:
     /* Get match expr, either from cache or from lflow match. */
     switch (lcv_type) {
     case LCACHE_T_NONE:
@@ -1188,7 +1290,7 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
                                      l_ctx_in->template_vars,
                                      &template_vars_ref,
                                      l_ctx_out->lflow_deps_mgr,
-                                     &pg_addr_set_ref);
+                                     &pg_addr_set_ref, &pg_ref);
         if (!expr) {
             goto done;
         }
@@ -1223,7 +1325,9 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
         break;
     }
 
-    /* Get matches, either from cache or from expr computed above. */
+    /* Get matches, either from cache or from expr computed above.  Cached
+     * matches don't depend on the datapath: the cache is only used for flows
+     * that don't reference ports, port groups, or address sets. */
     uint32_t start_conj_id = 0;
     uint32_t n_conjs = 0;
     switch (lcv_type) {
@@ -1231,30 +1335,74 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
     case LCACHE_T_EXPR:
         matches = xmalloc(sizeof *matches);
         n_conjs = expr_to_matches(expr, lookup_port_cb, &aux, matches);
-        if (hmap_is_empty(matches)) {
-            VLOG_DBG("lflow "UUID_FMT" matches are empty, skip",
-                     UUID_ARGS(&lflow->header_.uuid));
-            goto done;
+        break;
+    case LCACHE_T_MATCHES:
+        matches = lcv->expr_matches;
+        n_conjs = lcv->n_conjs;
+        break;
+    }
+    shared = (dp_group_bit && !aux.dp_dependent && !pg_ref
+              && !(ldp->is_switch && matches_have_lport(matches, ingress)));
+
+    if (hmap_is_empty(matches)) {
+        VLOG_DBG("lflow "UUID_FMT" matches are empty, skip",
+                 UUID_ARGS(&lflow->header_.uuid));
+        /* If the matches don't depend on the datapath, they are empty for
+         * all the datapaths of the group. */
+        result = shared ? LFLOW_DPG_SHARED : LFLOW_DPG_EXPANDED;
+        goto done;
+    }
+
+    /* Encode the actions before allocating conjunction ids: the result tells
+     * whether the flows can be shared by the datapath group, which
+     * determines the key used for allocating them. */
+    if (!actions_encoded) {
+        bool dp_specific = false;
+        ctrl_meter_id = encode_lflow_actions(lflow, ldp, &ovnacts, ingress,
+                                             &aux, l_ctx_in, l_ctx_out,
+                                             &ofpacts, &dp_specific);
+        actions_encoded = true;
+        if (dp_specific || aux.dp_dependent) {
+            dp_group_bit = 0;
         }
-        if (n_conjs) {
+    }
+    shared = shared && dp_group_bit;
+    result = shared ? LFLOW_DPG_SHARED : LFLOW_DPG_EXPANDED;
+
+    if (n_conjs) {
+        const struct uuid *conj_key = (shared
+                                       ? &lflow->logical_dp_group->header_.uuid
+                                       : &dp->header_.uuid);
+        if (lcv_type == LCACHE_T_MATCHES) {
+            if (!lflow_conj_ids_alloc_specified(l_ctx_out->conj_ids,
+                                                &lflow->header_.uuid,
+                                                conj_key, lcv->conj_id_ofs,
+                                                n_conjs)) {
+                /* This should happen very rarely. */
+                VLOG_DBG("lflow "UUID_FMT" match cached with conjunctions, "
+                         "but the cached ids are not available anymore. "
+                         "Drop the cache.", UUID_ARGS(&lflow->header_.uuid));
+                lflow_cache_delete(l_ctx_out->lflow_cache,
+                                   &lflow->header_.uuid);
+                lcv_type = LCACHE_T_NONE;
+                matches = NULL;
+                goto retry;
+            }
+        } else {
             start_conj_id = lflow_conj_ids_alloc(l_ctx_out->conj_ids,
                                                  &lflow->header_.uuid,
-                                                 &dp->header_.uuid,
-                                                 n_conjs);
+                                                 conj_key, n_conjs);
             if (!start_conj_id) {
                 VLOG_ERR("32-bit conjunction ids exhausted!");
                 goto done;
             }
             matches_size = expr_matches_prepare(matches, start_conj_id - 1);
         }
-        break;
-    case LCACHE_T_MATCHES:
-        matches = lcv->expr_matches;
-        break;
     }
 
-    add_matches_to_flow_table(lflow, ldp, matches, ptable, output_ptable,
-                              &ovnacts, ingress, l_ctx_in, l_ctx_out);
+    add_matches_to_flow_table(lflow, ldp, matches, ptable, &ofpacts,
+                              ctrl_meter_id, shared ? dp_group_bit : 0,
+                              ingress, l_ctx_in, l_ctx_out);
 
     /* Update cache if needed. */
     switch (lcv_type) {
@@ -1285,9 +1433,14 @@ consider_logical_flow__(const struct sbrec_logical_flow *lflow,
     }
 
 done:
+    if (lcv_type == LCACHE_T_MATCHES) {
+        /* Cached matches were used, don't destroy them. */
+        matches = NULL;
+    }
     expr_destroy(prereqs);
     ovnacts_free(ovnacts.data, ovnacts.size);
     ofpbuf_uninit(&ovnacts);
+    ofpbuf_uninit(&ofpacts);
     expr_destroy(expr);
     expr_destroy(cached_expr);
     expr_matches_destroy(matches);
@@ -1296,6 +1449,56 @@ done:
     store_lflow_template_refs(l_ctx_out->lflow_deps_mgr,
                               &template_vars_ref, lflow);
     sset_destroy(&template_vars_ref);
+
+    return result;
+}
+
+/* Translates 'lflow' of datapath group 'dp_group' for all its local
+ * datapaths. */
+static void
+consider_logical_flow_for_dp_group(
+    const struct sbrec_logical_flow *lflow,
+    const struct sbrec_logical_dp_group *dp_group,
+    struct lflow_ctx_in *l_ctx_in, struct lflow_ctx_out *l_ctx_out)
+{
+    struct of_dp_groups *dpgs = l_ctx_out->dp_groups;
+    uint64_t dp_group_bit = of_dp_groups_get_bit(dpgs, dp_group);
+    bool shared = false;
+
+    for (size_t i = 0; i < dp_group->n_datapaths; i++) {
+        const struct sbrec_datapath_binding *dp = dp_group->datapaths[i];
+        uint64_t bit = dp_group_bit;
+
+        if (bit) {
+            const struct local_datapath *ldp =
+                get_local_datapath(l_ctx_in->local_datapaths, dp->tunnel_key);
+            if (!ldp) {
+                continue;
+            }
+            if (!of_dp_groups_dp_compatible(dpgs, dp_group, ldp->is_switch)) {
+                /* The datapath doesn't get the group bit. */
+                bit = 0;
+            } else if (shared) {
+                continue;
+            }
+        }
+
+        enum lflow_dpg_result result =
+            consider_logical_flow__(lflow, dp, bit, l_ctx_in, l_ctx_out);
+        if (bit) {
+            if (result == LFLOW_DPG_SHARED) {
+                shared = true;
+            } else if (result == LFLOW_DPG_EXPANDED) {
+                /* The translation depends on the datapath, expand the
+                 * remaining datapaths too. */
+                dp_group_bit = 0;
+            }
+        }
+    }
+
+    if (shared) {
+        uuidset_insert(&dpgs->shared_lflows, &lflow->header_.uuid);
+    }
 }
 
 static void
@@ -1321,14 +1524,13 @@ consider_logical_flow(const struct sbrec_logical_flow *lflow,
         uuidset_insert(l_ctx_out->objs_processed, &lflow->header_.uuid);
     }
 
+    uuidset_find_and_delete(&l_ctx_out->dp_groups->shared_lflows,
+                            &lflow->header_.uuid);
     if (dp) {
-        consider_logical_flow__(lflow, dp, l_ctx_in, l_ctx_out);
+        consider_logical_flow__(lflow, dp, 0, l_ctx_in, l_ctx_out);
         return;
     }
-    for (size_t i = 0; dp_group && i < dp_group->n_datapaths; i++) {
-        consider_logical_flow__(lflow, dp_group->datapaths[i],
-                                l_ctx_in, l_ctx_out);
-    }
+    consider_logical_flow_for_dp_group(lflow, dp_group, l_ctx_in, l_ctx_out);
 }
 
 static void
@@ -1439,11 +1641,14 @@ add_lb_vip_hairpin_reply_action(struct in6_addr *vip6, ovs_be32 vip,
 
     ol_spec->dst.field = mf_from_id(MFF_METADATA);
     ol_spec->dst.ofs = 0;
-    ol_spec->dst.n_bits = ol_spec->dst.field->n_bits;
+    ol_spec->dst.n_bits = (of_dp_groups_enabled()
+                           ? OVN_DP_KEY_BITS
+                           : ol_spec->dst.field->n_bits);
     ol_spec->n_bits = ol_spec->dst.n_bits;
     ol_spec->dst_type = NX_LEARN_DST_MATCH;
     ol_spec->src_type = NX_LEARN_SRC_FIELD;
     ol_spec->src.field = mf_from_id(MFF_METADATA);
+    ol_spec->src.n_bits = ol_spec->n_bits;
 
     /* Match on the same ETH type as the packet that created the hairpin
      * session.
@@ -1679,7 +1884,7 @@ add_lb_ct_snat_hairpin_for_dp(const struct ovn_controller_lb *lb,
         if (!get_local_datapath(local_datapaths, datapath->tunnel_key)) {
             return;
         }
-        match_set_metadata(dp_match, htonll(datapath->tunnel_key));
+        ovn_match_set_dp_key(dp_match, datapath->tunnel_key);
     }
 
     uint16_t priority = datapath ? 200 : 100;
@@ -1976,7 +2181,7 @@ consider_fdb_flows(const struct sbrec_fdb *fdb,
     }
 
     struct match match = MATCH_CATCHALL_INITIALIZER;
-    match_set_metadata(&match, htonll(fdb->dp_key));
+    ovn_match_set_dp_key(&match, fdb->dp_key);
     match_set_dl_dst(&match, mac);
 
     uint64_t stub[1024 / 8];
@@ -1991,7 +2196,7 @@ consider_fdb_flows(const struct sbrec_fdb *fdb,
     put_load(1, MFF_LOG_FLAGS, MLF_LOOKUP_FDB_BIT, 1, &ofpacts);
 
     struct match lookup_match = MATCH_CATCHALL_INITIALIZER;
-    match_set_metadata(&lookup_match, htonll(fdb->dp_key));
+    ovn_match_set_dp_key(&lookup_match, fdb->dp_key);
     match_set_dl_src(&lookup_match, mac);
     match_set_reg(&lookup_match, MFF_LOG_INPORT - MFF_REG0, fdb->port_key);
     ofctrl_add_flow(flow_table, OFTABLE_LOOKUP_FDB, 100,
@@ -2000,7 +2205,7 @@ consider_fdb_flows(const struct sbrec_fdb *fdb,
 
     if (is_vif && localnet_learn_fdb) {
         struct match lookup_match_vif = MATCH_CATCHALL_INITIALIZER;
-        match_set_metadata(&lookup_match_vif, htonll(fdb->dp_key));
+        ovn_match_set_dp_key(&lookup_match_vif, fdb->dp_key);
         match_set_dl_src(&lookup_match_vif, mac);
         match_set_reg_masked(&lookup_match_vif, MFF_LOG_FLAGS - MFF_REG0,
                              MLF_LOCALNET, MLF_LOCALNET);
@@ -2036,7 +2241,16 @@ lflow_run(struct lflow_ctx_in *l_ctx_in, struct lflow_ctx_out *l_ctx_out)
 {
     COVERAGE_INC(lflow_run);
 
+    /* The caller cleared the desired flow table, including the flows that
+     * store the datapath group bits. */
+    of_dp_groups_clear_flows(l_ctx_out->dp_groups);
+    of_dp_groups_assign_all(l_ctx_out->dp_groups,
+                            l_ctx_in->logical_dp_group_table,
+                            l_ctx_in->sbrec_logical_flow_by_logical_dp_group,
+                            l_ctx_in->local_datapaths);
+
     add_logical_flows(l_ctx_in, l_ctx_out);
+    lflow_sync_dp_groups(l_ctx_in, l_ctx_out);
     add_neighbor_flows(l_ctx_in->sbrec_port_binding_by_name,
                        l_ctx_in->mac_binding_table,
                        l_ctx_in->static_mac_binding_table,
@@ -2051,6 +2265,44 @@ lflow_run(struct lflow_ctx_in *l_ctx_in, struct lflow_ctx_out *l_ctx_out)
                   l_ctx_in->localnet_learn_fdb);
     add_port_sec_flows(l_ctx_in->binding_lports, l_ctx_in->chassis,
                        l_ctx_out->flow_table);
+}
+
+/* Updates the flows that store the datapath group bits of the local
+ * datapaths. */
+void
+lflow_sync_dp_groups(struct lflow_ctx_in *l_ctx_in,
+                     struct lflow_ctx_out *l_ctx_out)
+{
+    of_dp_groups_sync_stamps(l_ctx_out->dp_groups,
+                             l_ctx_in->logical_dp_group_table,
+                             l_ctx_in->local_datapaths,
+                             l_ctx_out->flow_table);
+}
+
+/* Handles Logical_DP_Group changes.  Must run before the logical flows
+ * changes are handled: logical flows referencing new or deleted groups, and
+ * groups whose datapaths changed, are tracked as changed too and get
+ * translated again with the updated bit assignment. */
+void
+lflow_handle_changed_dp_groups(struct lflow_ctx_in *l_ctx_in,
+                               struct lflow_ctx_out *l_ctx_out)
+{
+    struct of_dp_groups *dpgs = l_ctx_out->dp_groups;
+    const struct sbrec_logical_dp_group *ldpg;
+
+    SBREC_LOGICAL_DP_GROUP_TABLE_FOR_EACH_TRACKED (
+        ldpg, l_ctx_in->logical_dp_group_table) {
+        if (sbrec_logical_dp_group_is_deleted(ldpg)) {
+            of_dp_groups_release(dpgs, &ldpg->header_.uuid);
+        }
+    }
+    SBREC_LOGICAL_DP_GROUP_TABLE_FOR_EACH_TRACKED (
+        ldpg, l_ctx_in->logical_dp_group_table) {
+        if (!sbrec_logical_dp_group_is_deleted(ldpg)) {
+            of_dp_groups_try_assign(dpgs, ldpg, l_ctx_in->local_datapaths);
+        }
+    }
+    lflow_sync_dp_groups(l_ctx_in, l_ctx_out);
 }
 
 /* Should be called at every ovn-controller iteration before IDL tracked
@@ -2097,9 +2349,13 @@ lflow_add_flows_for_datapath(const struct sbrec_datapath_binding *dp,
             continue;
         }
         uuidset_insert(l_ctx_out->objs_processed, &lflow->header_.uuid);
-        consider_logical_flow__(lflow, dp, l_ctx_in, l_ctx_out);
+        consider_logical_flow__(lflow, dp, 0, l_ctx_in, l_ctx_out);
     }
     sbrec_logical_flow_index_destroy_row(lf_row);
+
+    struct of_dp_groups *dpgs = l_ctx_out->dp_groups;
+    const struct local_datapath *ldp =
+        get_local_datapath(l_ctx_in->local_datapaths, dp->tunnel_key);
 
     lf_row = sbrec_logical_flow_index_init_row(
         l_ctx_in->sbrec_logical_flow_by_logical_dp_group);
@@ -2119,16 +2375,47 @@ lflow_add_flows_for_datapath(const struct sbrec_datapath_binding *dp,
         }
 
         sbrec_logical_flow_index_set_logical_dp_group(lf_row, ldpg);
+
+        uint64_t dp_group_bit = of_dp_groups_get_bit(dpgs, ldpg);
+        if (dp_group_bit && ldp
+            && !of_dp_groups_dp_compatible(dpgs, ldpg, ldp->is_switch)) {
+            dp_group_bit = 0;
+        }
+        if (!dp_group_bit && of_dp_groups_try_assign(
+                                dpgs, ldpg, l_ctx_in->local_datapaths)) {
+            /* The group got a bit now that it has enough local datapaths,
+             * translate its lflows again to share the flows. */
+            struct uuidset todo = UUIDSET_INITIALIZER(&todo);
+            SBREC_LOGICAL_FLOW_FOR_EACH_EQUAL (
+                lflow, lf_row,
+                l_ctx_in->sbrec_logical_flow_by_logical_dp_group) {
+                uuidset_insert(&todo, &lflow->header_.uuid);
+            }
+            lflow_reprocess(&todo, true, l_ctx_in, l_ctx_out);
+            uuidset_destroy(&todo);
+            continue;
+        }
+
         SBREC_LOGICAL_FLOW_FOR_EACH_EQUAL (
             lflow, lf_row, l_ctx_in->sbrec_logical_flow_by_logical_dp_group) {
             if (uuidset_find(l_ctx_out->objs_processed,
                              &lflow->header_.uuid)) {
                 continue;
             }
+            if (dp_group_bit
+                && uuidset_contains(&dpgs->shared_lflows,
+                                    &lflow->header_.uuid)) {
+                /* The shared flows already cover the new datapath once it
+                 * gets the group bit. */
+                continue;
+            }
             /* Don't call uuidset_insert() because here we process the
              * lflow only for one of the DPs in the DP group, which may be
              * incomplete. */
-            consider_logical_flow__(lflow, dp, l_ctx_in, l_ctx_out);
+            if (consider_logical_flow__(lflow, dp, dp_group_bit, l_ctx_in,
+                                        l_ctx_out) == LFLOW_DPG_SHARED) {
+                uuidset_insert(&dpgs->shared_lflows, &lflow->header_.uuid);
+            }
         }
     }
     sbrec_logical_flow_index_destroy_row(lf_row);
@@ -2525,7 +2812,7 @@ reset_match_for_port_sec_flows(const struct sbrec_port_binding *pb,
                                enum mf_field_id reg_id, struct match *match)
 {
     match_init_catchall(match);
-    match_set_metadata(match, htonll(pb->datapath->tunnel_key));
+    ovn_match_set_dp_key(match, pb->datapath->tunnel_key);
     match_set_reg(match, reg_id - MFF_REG0, pb->tunnel_key);
 }
 

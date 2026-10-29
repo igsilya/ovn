@@ -40,6 +40,7 @@
 #include "openvswitch/hmap.h"
 #include "lb.h"
 #include "lflow.h"
+#include "of-dp-groups.h"
 #include "lflow-cache.h"
 #include "lib/lflow-conj-ids.h"
 #include "lib/vswitch-idl.h"
@@ -803,6 +804,19 @@ update_sb_db(struct ovsdb_idl *ovs_idl, struct ovsdb_idl *ovnsb_idl,
     }
 
     if (ctx) {
+        if (of_dp_groups_set_enabled(
+                get_chassis_external_id_value_bool(
+                    &cfg->external_ids, chassis_id,
+                    "ovn-openflow-dp-groups", false))) {
+            engine_set_force_recompute();
+        }
+        if (of_dp_groups_set_max_bits(
+                get_chassis_external_id_value_uint(
+                    &cfg->external_ids, chassis_id,
+                    "ovn-openflow-dp-groups-max-bits",
+                    OF_DP_GROUPS_MAX_BITS))) {
+            engine_set_force_recompute();
+        }
         lflow_cache_enable(
             ctx->lflow_cache,
             get_chassis_external_id_value_bool(
@@ -4151,6 +4165,9 @@ struct ed_type_lflow_output {
 
     /* Configured Flow Sample Collector Sets. */
     struct flow_collector_ids collector_ids;
+
+    /* OpenFlow datapath groups. */
+    struct of_dp_groups dp_groups;
 };
 
 static void
@@ -4302,6 +4319,7 @@ init_lflow_ctx(struct engine_node *node,
     l_ctx_out->lflow_deps_mgr = &fo->lflow_deps_mgr;
     l_ctx_out->conj_ids = &fo->conj_ids;
     l_ctx_out->objs_processed = &fo->objs_processed;
+    l_ctx_out->dp_groups = &fo->dp_groups;
     l_ctx_out->lflow_cache = fo->pd.lflow_cache;
 }
 
@@ -4318,6 +4336,7 @@ en_lflow_output_init(struct engine_node *node OVS_UNUSED,
     nd_ra_opts_init(&data->nd_ra_opts);
     controller_event_opts_init(&data->controller_event_opts);
     flow_collector_ids_init(&data->collector_ids);
+    of_dp_groups_init(&data->dp_groups);
     return data;
 }
 
@@ -4341,6 +4360,7 @@ en_lflow_output_cleanup(void *data)
     nd_ra_opts_destroy(&flow_output_data->nd_ra_opts);
     controller_event_opts_destroy(&flow_output_data->controller_event_opts);
     flow_collector_ids_destroy(&flow_output_data->collector_ids);
+    of_dp_groups_destroy(&flow_output_data->dp_groups);
 }
 
 static enum engine_node_state
@@ -4405,6 +4425,24 @@ en_lflow_output_run(struct engine_node *node, void *data)
     lflow_run(&l_ctx_in, &l_ctx_out);
 
     return EN_UPDATED;
+}
+
+static enum engine_input_handler_result
+lflow_output_sb_logical_dp_group_handler(struct engine_node *node, void *data)
+{
+    /* Without OpenFlow datapath groups, nothing to do: an update of a
+     * datapath group puts the logical flows referencing it into the tracked
+     * list, so the logical flow handler processes all changes. */
+    if (!of_dp_groups_enabled()) {
+        return EN_HANDLED_UNCHANGED;
+    }
+
+    struct ed_type_lflow_output *fo = data;
+    struct lflow_ctx_in l_ctx_in;
+    struct lflow_ctx_out l_ctx_out;
+    init_lflow_ctx(node, fo, &l_ctx_in, &l_ctx_out);
+    lflow_handle_changed_dp_groups(&l_ctx_in, &l_ctx_out);
+    return EN_HANDLED_UPDATED;
 }
 
 static enum engine_input_handler_result
@@ -4808,12 +4846,14 @@ lflow_output_runtime_data_handler(struct engine_node *node,
     init_lflow_ctx(node, fo, &l_ctx_in, &l_ctx_out);
 
     struct tracked_datapath *tdp;
+    bool new_dps = false;
     HMAP_FOR_EACH (tdp, node, tracked_dp_bindings) {
         if (tdp->tracked_type == TRACKED_RESOURCE_NEW) {
             if (!lflow_add_flows_for_datapath(tdp->dp, &l_ctx_in,
                                               &l_ctx_out)) {
                 return EN_UNHANDLED;
             }
+            new_dps = true;
         }
         struct shash_node *shash_node;
         SHASH_FOR_EACH (shash_node, &tdp->lports) {
@@ -4824,6 +4864,9 @@ lflow_output_runtime_data_handler(struct engine_node *node,
                 return EN_UNHANDLED;
             }
         }
+    }
+    if (new_dps) {
+        lflow_sync_dp_groups(&l_ctx_in, &l_ctx_out);
     }
 
     return EN_HANDLED_UPDATED;
@@ -7955,14 +7998,13 @@ inc_proc_ovn_controller_init(
                      lflow_output_sb_mac_binding_handler);
     engine_add_input(&en_lflow_output, &en_sb_static_mac_binding,
                      lflow_output_sb_static_mac_binding_handler);
+    /* Datapath group changes must be handled before logical flow changes,
+     * the datapath group bits assigned to groups affect the translation of
+     * the logical flows. */
+    engine_add_input(&en_lflow_output, &en_sb_logical_dp_group,
+                     lflow_output_sb_logical_dp_group_handler);
     engine_add_input(&en_lflow_output, &en_sb_logical_flow,
                      lflow_output_sb_logical_flow_handler);
-    /* Using a noop handler since we don't really need any data from datapath
-     * groups or a full recompute.  Update of a datapath group will put
-     * logical flow into the tracked list, so the logical flow handler will
-     * process all changes. */
-    engine_add_input(&en_lflow_output, &en_sb_logical_dp_group,
-                     engine_noop_handler);
 
     engine_add_input(&en_lflow_output, &en_lb_data,
                      lflow_output_lb_data_handler);

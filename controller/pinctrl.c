@@ -62,6 +62,7 @@
 #include "timeval.h"
 #include "vswitch-idl.h"
 #include "lflow.h"
+#include "of-dp-groups.h"
 #include "ip-mcast.h"
 #include "ovn-sb-idl.h"
 #include "ovn-dns.h"
@@ -1305,7 +1306,7 @@ ipv6_prefixd_send(struct rconn *swconn, struct ipv6_prefixd_state *pfd)
     put_load(port_key, MFF_LOG_INPORT, 0, 32, &ofpacts);
     struct ofpact_resubmit *resubmit = ofpact_put_RESUBMIT(&ofpacts);
     resubmit->in_port = OFPP_CONTROLLER;
-    resubmit->table_id = OFTABLE_LOG_INGRESS_PIPELINE;
+    resubmit->table_id = of_dp_groups_ingress_table();
 
     struct ofputil_packet_out po = {
         .packet = dp_packet_data(&packet),
@@ -1618,7 +1619,8 @@ pinctrl_handle_buffered_packets(const struct ofputil_packet_in *pin,
         memcpy(&ip, &ip6, sizeof ip);
     }
 
-    mac_binding_data_init(&mb_data, ntohll(md->flow.metadata),
+    mac_binding_data_init(&mb_data,
+                          ntohll(md->flow.metadata) & OVN_DP_KEY_MASK,
                           md->flow.regs[MFF_LOG_OUTPORT - MFF_REG0],
                           ip, eth_addr_zero);
 
@@ -3593,7 +3595,8 @@ pinctrl_handle_dns_lookup(
     uint32_t query_size = rest - in_dns_data_start;
     uint32_t query_l4_size = rest - l4_start;
 
-    uint64_t dp_key = ntohll(pin->flow_metadata.flow.metadata);
+    uint64_t dp_key =
+        ntohll(pin->flow_metadata.flow.metadata) & OVN_DP_KEY_MASK;
     bool ovn_owned = false;
     uint32_t ttl = DNS_DEFAULT_RR_TTL;
     const char *answer_data = ovn_dns_lookup(ds_cstr(&query_name), dp_key,
@@ -4606,7 +4609,7 @@ ipv6_ra_send(struct rconn *swconn, struct ipv6_ra_state *ra)
     }
     struct ofpact_resubmit *resubmit = ofpact_put_RESUBMIT(&ofpacts);
     resubmit->in_port = OFPP_CONTROLLER;
-    resubmit->table_id = OFTABLE_LOG_INGRESS_PIPELINE;
+    resubmit->table_id = of_dp_groups_ingress_table();
 
     struct ofputil_packet_out po = {
         .packet = dp_packet_data(&packet),
@@ -4861,7 +4864,7 @@ pinctrl_handle_put_mac_binding(const struct flow *md,
             .cookie = eth_addr_is_multicast(headers->dl_dst)
                       ? MAC_BINDINGS_MC_COOKIE
                       : 0,
-            .dp_key =  ntohll(md->metadata),
+            .dp_key =  ntohll(md->metadata) & OVN_DP_KEY_MASK,
             .port_key =  md->regs[MFF_LOG_INPORT - MFF_REG0],
             .mac = headers->dl_src,
     };
@@ -5286,14 +5289,14 @@ send_garp_rarp(struct rconn *swconn, struct garp_rarp_node *garp_rarp,
                                           garp_rarp->port_key,
                                           garp_rarp->ea, eth_addr_zero,
                                           &addr, &addr,
-                                          OFTABLE_LOG_INGRESS_PIPELINE);
+                                          of_dp_groups_ingress_table());
     } else {
         send_self_originated_neigh_packet(swconn,
                                           garp_rarp->dp_key,
                                           garp_rarp->port_key,
                                           garp_rarp->ea, eth_addr_zero,
                                           NULL, NULL,
-                                          OFTABLE_LOG_INGRESS_PIPELINE);
+                                          of_dp_groups_ingress_table());
     }
 
     /* Set the next announcement.  At most 5 announcements are sent for a
@@ -6211,7 +6214,7 @@ pinctrl_ip_mcast_handle(struct rconn *swconn,
         return;
     }
 
-    int64_t dp_key = ntohll(md->flow.metadata);
+    int64_t dp_key = ntohll(md->flow.metadata) & OVN_DP_KEY_MASK;
 
     struct ip_mcast_snoop *ip_ms = ip_mcast_snoop_find(dp_key);
     if (!ip_ms || !ip_ms->cfg.enabled) {
@@ -7274,7 +7277,7 @@ pinctrl_handle_bind_vport(
     OVS_REQUIRES(pinctrl_mutex)
 {
     /* Get the datapath key from the packet metadata. */
-    uint32_t dp_key = ntohll(md->metadata);
+    uint32_t dp_key = ntohll(md->metadata) & OVN_DP_KEY_MASK;
     uint32_t vport_parent_key = md->regs[MFF_LOG_INPORT - MFF_REG0];
 
     /* Get the virtual port key from the userdata buffer. */
@@ -7987,7 +7990,7 @@ pinctrl_send_bfd_tx_msg(struct rconn *swconn, struct bfd_entry *entry,
     put_load(port_key, MFF_LOG_INPORT, 0, 32, &ofpacts);
     struct ofpact_resubmit *resubmit = ofpact_put_RESUBMIT(&ofpacts);
     resubmit->in_port = OFPP_CONTROLLER;
-    resubmit->table_id = OFTABLE_LOG_INGRESS_PIPELINE;
+    resubmit->table_id = of_dp_groups_ingress_table();
 
     struct ofputil_packet_out po = {
         .packet = dp_packet_data(&packet),
@@ -8892,7 +8895,7 @@ static void
 pinctrl_handle_svc_check(struct rconn *swconn, const struct flow *ip_flow,
                          struct dp_packet *pkt_in, const struct match *md)
 {
-    uint32_t dp_key = ntohll(md->flow.metadata);
+    uint32_t dp_key = ntohll(md->flow.metadata) & OVN_DP_KEY_MASK;
     uint32_t port_key = md->flow.regs[MFF_LOG_INPORT - MFF_REG0];
     struct in6_addr ip_addr;
     struct in6_addr dst_ip_addr;
@@ -9244,12 +9247,12 @@ pinctrl_activation_strategy_handler(const struct match *md)
     /* Tag the port as activated in-memory. */
     struct activated_port *pp = xmalloc(sizeof *pp);
     pp->port_key = md->flow.regs[MFF_LOG_INPORT - MFF_REG0];
-    pp->dp_key = ntohll(md->flow.metadata);
+    pp->dp_key = ntohll(md->flow.metadata) & OVN_DP_KEY_MASK;
     ovs_list_push_front(&ports_to_activate_in_db, &pp->list);
 
     pp = xmalloc(sizeof *pp);
     pp->port_key = md->flow.regs[MFF_LOG_INPORT - MFF_REG0];
-    pp->dp_key = ntohll(md->flow.metadata);
+    pp->dp_key = ntohll(md->flow.metadata) & OVN_DP_KEY_MASK;
     ovs_list_push_front(&ports_to_activate_in_engine, &pp->list);
 
     /* Notify main thread on pending additional-chassis-activated updates. */
@@ -9464,7 +9467,7 @@ static void
 pinctrl_handle_put_fdb(const struct flow *md, const struct flow *headers)
 {
     struct fdb_data fdb_data = (struct fdb_data) {
-            .dp_key =  ntohll(md->metadata),
+            .dp_key =  ntohll(md->metadata) & OVN_DP_KEY_MASK,
             .port_key =  md->regs[MFF_LOG_INPORT - MFF_REG0],
             .mac = headers->dl_src,
     };

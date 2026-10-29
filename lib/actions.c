@@ -1150,6 +1150,9 @@ encode_CT_DNAT_IN_CZONE(const struct ovnact_ct_nat *cn,
                         const struct ovnact_encode_params *ep,
                         struct ofpbuf *ofpacts)
 {
+    if (ep->dp_specific) {
+        *ep->dp_specific = true;
+    }
     encode_ct_nat(cn, ep, ep->common_nat_ct_zone, ofpacts);
 }
 
@@ -1158,6 +1161,9 @@ encode_CT_SNAT_IN_CZONE(const struct ovnact_ct_nat *cn,
                         const struct ovnact_encode_params *ep,
                         struct ofpbuf *ofpacts)
 {
+    if (ep->dp_specific) {
+        *ep->dp_specific = true;
+    }
     encode_ct_nat(cn, ep, ep->common_nat_ct_zone, ofpacts);
 }
 
@@ -4730,6 +4736,27 @@ format_NF_LEARN_ORIG_INPORT(const struct ovnact_nf_learn *nf_learn,
  * nf_learn_orig_inport(). */
 #define NF_LEARN_ORIG_INPORT_IDLE_TIMEOUT_S 60
 
+/* Adds a NXAST_LEARN spec matching the logical datapath of the packet that
+ * triggers the learn on future packets. */
+static void
+learn_put_match_datapath(struct ofpbuf *ofpacts,
+                         const struct ovnact_encode_params *ep)
+{
+    struct ofpact_learn_spec *ol_spec =
+        ofpbuf_put_zeros(ofpacts, sizeof *ol_spec);
+    ol_spec->dst.field = mf_from_id(MFF_LOG_DATAPATH);
+    ol_spec->dst.ofs = 0;
+    ol_spec->dst.n_bits = (ep->dp_key_bits_only
+                           ? OVN_DP_KEY_BITS
+                           : ol_spec->dst.field->n_bits);
+    ol_spec->n_bits = ol_spec->dst.n_bits;
+    ol_spec->dst_type = NX_LEARN_DST_MATCH;
+    ol_spec->src_type = NX_LEARN_SRC_FIELD;
+    ol_spec->src.field = mf_from_id(MFF_LOG_DATAPATH);
+    ol_spec->src.ofs = 0;
+    ol_spec->src.n_bits = ol_spec->n_bits;
+}
+
 /* Adds a NXAST_LEARN spec matching the value of field 'id' (as it is in the
  * packet that triggers the learn) on the same field of future packets. */
 static void
@@ -4766,7 +4793,7 @@ encode_NF_LEARN_ORIG_INPORT(const struct ovnact_nf_learn *nf_learn,
     ol->cookie = htonll(ep->lflow_uuid.parts[0]);
 
     /* Match on the logical datapath. */
-    nf_learn_put_match_field(ofpacts, MFF_METADATA);
+    learn_put_match_datapath(ofpacts, ep);
 
     /* Match on the same ETH type as the packet that created the flow. */
     ol_spec = ofpbuf_put_zeros(ofpacts, sizeof *ol_spec);
@@ -4984,6 +5011,9 @@ encode_SAMPLE(const struct ovnact_sample *sample,
     os->collector_set_id = sample->collector_set_id;
     os->obs_domain_imm =
         (sample->obs_domain_id << 24) | (ep->dp_key & 0xFFFFFF);
+    if (ep->dp_specific) {
+        *ep->dp_specific = true;
+    }
 
     if (sample->use_cookie) {
         os->obs_point_imm = ep->lflow_uuid.parts[0];
@@ -5262,14 +5292,7 @@ encode_COMMIT_LB_AFF(const struct ovnact_commit_lb_aff *lb_aff,
     ol->cookie = htonll(ep->lflow_uuid.parts[0]);
 
     /* Match on metadata of the packet that created the new table. */
-    ol_spec = ofpbuf_put_zeros(ofpacts, sizeof *ol_spec);
-    ol_spec->dst.field = mf_from_id(MFF_METADATA);
-    ol_spec->dst.ofs = 0;
-    ol_spec->dst.n_bits = ol_spec->dst.field->n_bits;
-    ol_spec->n_bits = ol_spec->dst.n_bits;
-    ol_spec->dst_type = NX_LEARN_DST_MATCH;
-    ol_spec->src_type = NX_LEARN_SRC_FIELD;
-    ol_spec->src.field = mf_from_id(MFF_METADATA);
+    learn_put_match_datapath(ofpacts, ep);
 
     /* Match on the same ETH type as the packet that created the new table. */
     ol_spec = ofpbuf_put_zeros(ofpacts, sizeof *ol_spec);

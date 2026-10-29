@@ -345,6 +345,43 @@
         The default value is considered false if this option is not defined.
       </dd>
 
+      <dt><code>external_ids:ovn-openflow-dp-groups</code></dt>
+      <dd>
+        <p>
+          The boolean flag indicates if <code>ovn-controller</code> should
+          translate logical flows that apply to a group of datapaths
+          (<code>Logical_DP_Group</code> in the Southbound database) into a
+          single set of OpenFlow flows shared by all the local datapaths of
+          the group, instead of one set of OpenFlow flows per datapath.
+        </p>
+
+        <p>
+          The datapath tunnel key only uses the low 24 bits of the OpenFlow
+          <code>metadata</code> field.  With this option, each datapath group
+          that has at least two local datapaths can get one of the remaining
+          40 bits assigned, preferring the groups that save the most OpenFlow
+          flows.  Before entering the logical ingress or egress pipeline of a
+          datapath, the bits of all the groups the datapath belongs to are
+          stored in <code>metadata</code>, and the shared OpenFlow flows match
+          on the bit of their group.  Logical flows of groups without a bit,
+          and logical flows whose translation depends on the specific
+          datapath (e.g., because they refer to logical ports by name), are
+          translated for each datapath as without this option.  All other
+          flows match only on the low 24 bits of <code>metadata</code>.
+        </p>
+
+        <p>
+          By default the option is disabled.
+        </p>
+      </dd>
+
+      <dt><code>external_ids:ovn-openflow-dp-groups-max-bits</code></dt>
+      <dd>
+        When <code>external_ids:ovn-openflow-dp-groups</code> is enabled,
+        this value limits the number of datapath groups that get a bit
+        assigned.  The value must be between 0 and 40.  The default is 40.
+      </dd>
+
       <dt><code>external_ids:ovn-enable-lflow-cache</code></dt>
       <dd>
         The boolean flag indicates if <code>ovn-controller</code> should

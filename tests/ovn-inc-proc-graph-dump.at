@@ -348,8 +348,8 @@ digraph "Incremental-Processing-Engine" {
 	OVS_flow_sample_collector_set [[style=filled, shape=box, fillcolor=white, label="OVS_flow_sample_collector_set"]];
 	SB_mac_binding [[style=filled, shape=box, fillcolor=white, label="SB_mac_binding"]];
 	SB_static_mac_binding [[style=filled, shape=box, fillcolor=white, label="SB_static_mac_binding"]];
-	SB_logical_flow [[style=filled, shape=box, fillcolor=white, label="SB_logical_flow"]];
 	SB_logical_dp_group [[style=filled, shape=box, fillcolor=white, label="SB_logical_dp_group"]];
+	SB_logical_flow [[style=filled, shape=box, fillcolor=white, label="SB_logical_flow"]];
 	SB_load_balancer [[style=filled, shape=box, fillcolor=white, label="SB_load_balancer"]];
 	lb_data [[style=filled, shape=box, fillcolor=white, label="lb_data"]];
 	SB_load_balancer -> lb_data [[label="lb_data_sb_load_balancer_handler"]];
@@ -372,8 +372,8 @@ digraph "Incremental-Processing-Engine" {
 	OVS_flow_sample_collector_set -> lflow_output [[label="lflow_output_flow_sample_collector_set_handler"]];
 	SB_mac_binding -> lflow_output [[label="lflow_output_sb_mac_binding_handler"]];
 	SB_static_mac_binding -> lflow_output [[label="lflow_output_sb_static_mac_binding_handler"]];
+	SB_logical_dp_group -> lflow_output [[label="lflow_output_sb_logical_dp_group_handler"]];
 	SB_logical_flow -> lflow_output [[label="lflow_output_sb_logical_flow_handler"]];
-	SB_logical_dp_group -> lflow_output [[label="engine_noop_handler"]];
 	lb_data -> lflow_output [[label="lflow_output_lb_data_handler"]];
 	SB_fdb -> lflow_output [[label="lflow_output_sb_fdb_handler"]];
 	SB_meter -> lflow_output [[label="lflow_output_sb_meter_handler"]];

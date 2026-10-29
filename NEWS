@@ -5,6 +5,12 @@ Post v26.09.0
      only skipped if their action is "reroute". Router policies of type
      "allow", "drop", and "jump" will still be accepted, even if the
      "nexthop" column is set on those policies.
+   - Added the "external_ids:ovn-openflow-dp-groups" option to
+     ovn-controller.  When enabled, logical flows of datapath groups are
+     translated into OpenFlow flows that are shared by the local datapaths
+     of the group, by storing up to 40 datapath group bits in the upper bits
+     of the OpenFlow metadata field.  This significantly reduces the number
+     of OpenFlow flows when many similar datapaths are local to a chassis.
    - Learn ARP sender hardware address (arp.sha) and IPv6 Neighbor
      Discovery link-layer addresses (nd.tll, nd.sll) into the FDB
      table in addition to eth.src.  This allows VRRP virtual MACs to

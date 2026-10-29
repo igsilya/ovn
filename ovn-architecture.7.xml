@@ -1221,7 +1221,10 @@
            ovn/lib/logical-fields.h. -->
       OVN uses the field that OpenFlow 1.1+ simply (and confusingly) calls
       ``metadata'' to store the logical datapath.  (This field is passed across
-      tunnels as part of the tunnel key.)
+      tunnels as part of the tunnel key.)  The datapath tunnel key uses the
+      low 24 bits of the field.  With OpenFlow datapath groups, the upper 40
+      bits hold the datapath group bits of the logical datapath.  They are
+      local to the chassis and aren't passed across tunnels.
     </dd>
 
     <dt>logical input port field</dt>
@@ -1630,6 +1633,19 @@
         which is checked via the presence of the bitflag
         MLF_OVERRIDE_LOCAL_ONLY. It resubmits other packets to
         <code>OFTABLE_LOG_EGRESS_PIPELINE</code>.
+      </p>
+
+      <p>
+        If OpenFlow datapath groups are enabled (see
+        <code>external_ids:ovn-openflow-dp-groups</code> in
+        <code>ovn-controller</code>(8)), packets enter the logical ingress and
+        egress pipelines through <code>OFTABLE_LOG_INGRESS_DP_GROUPS</code>
+        and <code>OFTABLE_LOG_EGRESS_DP_GROUPS</code> instead.  These tables
+        store the datapath group bits of the logical datapath in the bits of
+        the logical datapath field above the 24-bit datapath tunnel key,
+        before resubmitting to the first table of the pipeline.  OpenFlow
+        flows shared by all the datapaths of a datapath group match on the
+        bit of the group.
       </p>
     </li>
 

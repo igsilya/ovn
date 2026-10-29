@@ -52,6 +52,7 @@ struct ovsrec_flow_sample_collector_set_table;
 struct sbrec_chassis;
 struct sbrec_load_balancer;
 struct sbrec_logical_flow_table;
+struct of_dp_groups;
 struct sbrec_mac_binding_table;
 struct sbrec_datapath_binding;
 struct sbrec_port_binding;
@@ -65,6 +66,11 @@ struct uuid;
  * you make any changes. */
 #define OFTABLE_PHY_TO_LOG                  0
 
+/* Only used with OpenFlow datapath groups: stores the datapath group bits
+ * of the logical datapath in MFF_LOG_DATAPATH before resubmitting to the
+ * first table of the ingress pipeline. */
+#define OFTABLE_LOG_INGRESS_DP_GROUPS       7
+
 /* Start of LOG_PIPELINE_LEN tables. */
 #define OFTABLE_LOG_INGRESS_PIPELINE        8
 #define OFTABLE_OUTPUT_LARGE_PKT_DETECT    52
@@ -76,6 +82,9 @@ struct uuid;
 
 /* Start of the OUTPUT section of the pipeline. */
 #define OFTABLE_OUTPUT_INIT OFTABLE_OUTPUT_LARGE_PKT_DETECT
+
+/* Same as OFTABLE_LOG_INGRESS_DP_GROUPS, for the egress pipeline. */
+#define OFTABLE_LOG_EGRESS_DP_GROUPS       61
 
 /* Start of LOG_PIPELINE_LEN tables. */
 #define OFTABLE_LOG_EGRESS_PIPELINE        62
@@ -108,7 +117,11 @@ struct uuid;
 /* Verify that table regions do not overlap. */
 BUILD_ASSERT_DECL(OFTABLE_LOG_INGRESS_PIPELINE + LOG_PIPELINE_INGRESS_LEN
                   <= OFTABLE_OUTPUT_LARGE_PKT_DETECT);
-BUILD_ASSERT_DECL(OFTABLE_CHECK_LOOPBACK < OFTABLE_LOG_EGRESS_PIPELINE);
+BUILD_ASSERT_DECL(OFTABLE_CHECK_LOOPBACK < OFTABLE_LOG_EGRESS_DP_GROUPS);
+BUILD_ASSERT_DECL(OFTABLE_LOG_EGRESS_DP_GROUPS < OFTABLE_LOG_EGRESS_PIPELINE);
+BUILD_ASSERT_DECL(OFTABLE_PHY_TO_LOG < OFTABLE_LOG_INGRESS_DP_GROUPS);
+BUILD_ASSERT_DECL(OFTABLE_LOG_INGRESS_DP_GROUPS
+                  < OFTABLE_LOG_INGRESS_PIPELINE);
 BUILD_ASSERT_DECL(OFTABLE_LOG_EGRESS_PIPELINE + LOG_PIPELINE_EGRESS_LEN
                   <= OFTABLE_SAVE_INPORT);
 
@@ -159,6 +172,7 @@ struct lflow_ctx_out {
     struct lflow_cache *lflow_cache;
     struct conj_ids *conj_ids;
     struct uuidset *objs_processed;
+    struct of_dp_groups *dp_groups;
 };
 
 void lflow_init(void);
@@ -167,6 +181,9 @@ void lflow_handle_cached_flows(struct lflow_cache *,
                                const struct sbrec_logical_flow_table *);
 bool lflow_handle_changed_flows(struct lflow_ctx_in *,
                                 struct lflow_ctx_out *);
+void lflow_handle_changed_dp_groups(struct lflow_ctx_in *,
+                                    struct lflow_ctx_out *);
+void lflow_sync_dp_groups(struct lflow_ctx_in *, struct lflow_ctx_out *);
 
 struct addr_set_diff {
     struct expr_constant_set *added;

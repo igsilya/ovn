@@ -17,6 +17,7 @@
 
 #include "lflow.h"
 #include "neighbor-of.h"
+#include "of-dp-groups.h"
 #include "openvswitch/match.h"
 #include "ovn/logical-fields.h"
 
@@ -34,7 +35,7 @@ consider_neighbor_flow(const struct sbrec_port_binding *pb,
     struct match lookup_arp_for_stats_match = MATCH_CATCHALL_INITIALIZER;
 
     match_set_dl_src(&lookup_arp_match, mac);
-    match_set_metadata(&lookup_arp_match, htonll(pb->datapath->tunnel_key));
+    ovn_match_set_dp_key(&lookup_arp_match, pb->datapath->tunnel_key);
     match_set_reg(&lookup_arp_match, MFF_LOG_INPORT - MFF_REG0,
                   pb->tunnel_key);
 
@@ -67,13 +68,13 @@ consider_neighbor_flow(const struct sbrec_port_binding *pb,
         match_set_ipv6_src(&mb_cache_use_match, ip);
     }
 
-    match_set_metadata(&get_arp_match, htonll(pb->datapath->tunnel_key));
+    ovn_match_set_dp_key(&get_arp_match, pb->datapath->tunnel_key);
     match_set_reg(&get_arp_match, MFF_LOG_OUTPORT - MFF_REG0, pb->tunnel_key);
 
     match_set_dl_src(&mb_cache_use_match, mac);
     match_set_reg(&mb_cache_use_match, MFF_LOG_INPORT - MFF_REG0,
                   pb->tunnel_key);
-    match_set_metadata(&mb_cache_use_match, htonll(pb->datapath->tunnel_key));
+    ovn_match_set_dp_key(&mb_cache_use_match, pb->datapath->tunnel_key);
 
     uint64_t stub[1024 / 8];
     struct ofpbuf ofpacts = OFPBUF_STUB_INITIALIZER(stub);

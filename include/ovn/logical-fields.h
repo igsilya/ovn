@@ -48,6 +48,13 @@ BUILD_ASSERT_DECL(FLOW_N_REGS >= OVN_FLOW_N_REGS_SUPPORTED);
  * These values are documented in ovn-architecture(7), please update the
  * documentation if you change any of them. */
 #define MFF_LOG_DATAPATH MFF_METADATA /* Logical datapath (64 bits). */
+
+/* The datapath tunnel key occupies the low OVN_DP_KEY_BITS bits of
+ * MFF_LOG_DATAPATH.  When OpenFlow datapath groups are enabled in
+ * ovn-controller, the remaining upper bits carry a bitmap of the datapath
+ * groups that the current logical datapath belongs to. */
+#define OVN_DP_KEY_BITS 24
+#define OVN_DP_KEY_MASK ((UINT64_C(1) << OVN_DP_KEY_BITS) - 1)
 #define MFF_LOG_FLAGS      MFF_REG10  /* One of MLF_* (32 bits). */
 CHECK_REG(FLAGS);
 #define MFF_LOG_DNAT_ZONE  MFF_REG11  /* conntrack dnat zone for gateway router

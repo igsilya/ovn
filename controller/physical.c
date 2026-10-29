@@ -48,6 +48,7 @@
 #include "ovn/actions.h"
 #include "if-status.h"
 #include "physical.h"
+#include "of-dp-groups.h"
 #include "pinctrl.h"
 #include "openvswitch/shash.h"
 #include "simap.h"
@@ -553,7 +554,7 @@ match_outport_dp_and_port_keys(struct match *match,
                                uint32_t dp_key, uint32_t port_key)
 {
     match_init_catchall(match);
-    match_set_metadata(match, htonll(dp_key));
+    ovn_match_set_dp_key(match, dp_key);
     match_set_reg(match, MFF_LOG_OUTPORT - MFF_REG0, port_key);
 }
 
@@ -562,7 +563,7 @@ match_inport_dp_and_port_keys(struct match *match,
                               uint32_t dp_key, uint32_t port_key)
 {
     match_init_catchall(match);
-    match_set_metadata(match, htonll(dp_key));
+    ovn_match_set_dp_key(match, dp_key);
     match_set_reg(match, MFF_LOG_INPORT - MFF_REG0, port_key);
 }
 
@@ -1193,7 +1194,7 @@ put_replace_chassis_mac_flows(const struct shash *ct_zones,
         replace_mac->mac = router_port_mac;
 
         /* Resubmit to first logical ingress pipeline table. */
-        put_resubmit(OFTABLE_LOG_INGRESS_PIPELINE, ofpacts_p);
+        put_resubmit(of_dp_groups_ingress_table(), ofpacts_p);
         ofctrl_add_flow(flow_table, OFTABLE_PHY_TO_LOG, 180,
                         rport_binding->header_.uuid.parts[0],
                         &match, ofpacts_p, &localnet_port->header_.uuid);
@@ -1470,7 +1471,7 @@ put_local_common_flows(uint32_t dp_key,
     match_init_catchall(&match);
     ofpbuf_clear(ofpacts_p);
     put_drop(debug, OFTABLE_CHECK_LOOPBACK, ofpacts_p);
-    match_set_metadata(&match, htonll(dp_key));
+    ovn_match_set_dp_key(&match, dp_key);
     match_set_reg_masked(&match, MFF_LOG_FLAGS - MFF_REG0,
                          0, MLF_ALLOW_LOOPBACK);
     match_set_reg(&match, MFF_LOG_INPORT - MFF_REG0, port_key);
@@ -1489,9 +1490,9 @@ put_local_common_flows(uint32_t dp_key,
     if (nf_port) {
         match_init_catchall(&match);
         ofpbuf_clear(ofpacts_p);
-        match_set_metadata(&match, htonll(dp_key));
+        ovn_match_set_dp_key(&match, dp_key);
         clear_registers_for_nf_datapath(ofpacts_p);
-        put_resubmit(OFTABLE_LOG_EGRESS_PIPELINE, ofpacts_p);
+        put_resubmit(of_dp_groups_egress_table(), ofpacts_p);
         ofctrl_add_flow(flow_table, OFTABLE_CHECK_LOOPBACK, 1,
                         pb->datapath->header_.uuid.parts[0], &match,
                         ofpacts_p, &pb->datapath->header_.uuid);
@@ -1692,7 +1693,7 @@ setup_rarp_activation_strategy(const struct sbrec_port_binding *binding,
     load_logical_ingress_metadata(binding, zone_ids, 0, NULL, ofpacts, true);
     encode_controller_op(ACTION_OPCODE_ACTIVATION_STRATEGY,
                          NX_CTLR_NO_METER, ofpacts);
-    put_resubmit(OFTABLE_LOG_INGRESS_PIPELINE, ofpacts);
+    put_resubmit(of_dp_groups_ingress_table(), ofpacts);
 
     ofctrl_add_flow(flow_table, OFTABLE_PHY_TO_LOG, 1010,
                     binding->header_.uuid.parts[0],
@@ -1722,7 +1723,7 @@ setup_arp_activation_strategy(const struct sbrec_port_binding *binding,
     /* Unblock the traffic when it matches specified strategy. */
     encode_controller_op(ACTION_OPCODE_ACTIVATION_STRATEGY,
                          NX_CTLR_NO_METER, ofpacts);
-    put_resubmit(OFTABLE_LOG_INGRESS_PIPELINE, ofpacts);
+    put_resubmit(of_dp_groups_ingress_table(), ofpacts);
 
     ofctrl_add_flow(flow_table, OFTABLE_PHY_TO_LOG, 1010,
                     binding->header_.uuid.parts[0],
@@ -1754,7 +1755,7 @@ setup_nd_na_activation_strategy(const struct sbrec_port_binding *binding,
     /* Unblock the traffic when it matches specified strategy. */
     encode_controller_op(ACTION_OPCODE_ACTIVATION_STRATEGY,
                          NX_CTLR_NO_METER, ofpacts);
-    put_resubmit(OFTABLE_LOG_INGRESS_PIPELINE, ofpacts);
+    put_resubmit(of_dp_groups_ingress_table(), ofpacts);
 
     ofctrl_add_flow(flow_table, OFTABLE_PHY_TO_LOG, 1010,
                     binding->header_.uuid.parts[0],
@@ -1818,7 +1819,7 @@ setup_activation_strategy_flows(const struct sbrec_port_binding *binding,
     match_init_catchall(&match);
     uint32_t dp_key = binding->datapath->tunnel_key;
     uint32_t port_key = binding->tunnel_key;
-    match_set_metadata(&match, htonll(dp_key));
+    ovn_match_set_dp_key(&match, dp_key);
     match_set_reg(&match, MFF_LOG_OUTPORT - MFF_REG0, port_key);
 
     ofctrl_add_flow(flow_table, OFTABLE_LOG_TO_PHY, 1000,
@@ -1906,7 +1907,7 @@ determine_if_pkt_too_big(struct ovn_desired_flow_table *flow_table,
     struct match match;
     match_init_catchall(&match);
     match_set_dl_type(&match, htons(is_ipv6 ? ETH_TYPE_IPV6 : ETH_TYPE_IP));
-    match_set_metadata(&match, htonll(binding->datapath->tunnel_key));
+    ovn_match_set_dp_key(&match, binding->datapath->tunnel_key);
     match_set_reg(&match, direction - MFF_REG0, mcp->tunnel_key);
 
     /* reg9[1] is REGBIT_PKT_LARGER as defined by northd */
@@ -1941,7 +1942,7 @@ reply_icmp_error_if_pkt_too_big(struct ovn_desired_flow_table *flow_table,
     struct match match;
     match_init_catchall(&match);
     match_set_dl_type(&match, htons(is_ipv6 ? ETH_TYPE_IPV6 : ETH_TYPE_IP));
-    match_set_metadata(&match, htonll(binding->datapath->tunnel_key));
+    ovn_match_set_dp_key(&match, binding->datapath->tunnel_key);
     match_set_reg(&match, direction - MFF_REG0, mcp->tunnel_key);
     match_set_reg_masked(&match, MFF_REG9 - MFF_REG0, 1 << 1, 1 << 1);
 
@@ -2030,7 +2031,7 @@ reply_icmp_error_if_pkt_too_big(struct ovn_desired_flow_table *flow_table,
     encode_finish_ovn_field_note(note_offset, &inner_ofpacts);
 
     /* Finally, submit the ICMP error back to the ingress pipeline */
-    put_resubmit(OFTABLE_LOG_INGRESS_PIPELINE, &inner_ofpacts);
+    put_resubmit(of_dp_groups_ingress_table(), &inner_ofpacts);
 
     /* Attach nested actions to ICMP error controller handler */
     ofpacts_put_openflow_actions(inner_ofpacts.data, inner_ofpacts.size,
@@ -2219,13 +2220,13 @@ consider_port_binding(const struct physical_ctx *ctx,
          * Process ICMP{4,6} error packets too big locally generated from the
          * kernel in order to lookup proper ct_zone. */
         struct match match = MATCH_CATCHALL_INITIALIZER;
-        match_set_metadata(&match, htonll(dp_key));
+        ovn_match_set_dp_key(&match, dp_key);
         match_set_reg(&match, MFF_LOG_INPORT - MFF_REG0, port_key);
 
         struct zone_ids icmp_zone_ids = get_zone_ids(binding, ctx->ct_zones);
         ofpbuf_clear(ofpacts_p);
         put_zones_ofpacts(&icmp_zone_ids, ofpacts_p);
-        put_resubmit(OFTABLE_LOG_INGRESS_PIPELINE, ofpacts_p);
+        put_resubmit(of_dp_groups_ingress_table(), ofpacts_p);
         ofctrl_add_flow(flow_table, OFTABLE_CT_ZONE_LOOKUP, 100,
                         binding->header_.uuid.parts[0], &match,
                         ofpacts_p, &binding->header_.uuid);
@@ -2261,7 +2262,7 @@ consider_port_binding(const struct physical_ctx *ctx,
         for (int i = 0; i < MFF_N_LOG_REGS; i++) {
             put_load(0, MFF_LOG_REG0 + i, 0, 32, ofpacts_p);
         }
-        put_resubmit(OFTABLE_LOG_INGRESS_PIPELINE, ofpacts_p);
+        put_resubmit(of_dp_groups_ingress_table(), ofpacts_p);
         clone = ofpbuf_at_assert(ofpacts_p, clone_ofs, sizeof *clone);
         ofpacts_p->header = clone;
         ofpact_finish_CLONE(ofpacts_p, &clone);
@@ -2502,7 +2503,7 @@ consider_port_binding(const struct physical_ctx *ctx,
         }
 
         /* Resubmit to first logical ingress pipeline table. */
-        put_resubmit(OFTABLE_LOG_INGRESS_PIPELINE, ofpacts_p);
+        put_resubmit(of_dp_groups_ingress_table(), ofpacts_p);
         ofctrl_add_flow(flow_table, OFTABLE_PHY_TO_LOG,
                         tag ? 150 : 100, binding->header_.uuid.parts[0],
                         &match, ofpacts_p, &binding->header_.uuid);
@@ -2602,7 +2603,7 @@ consider_port_binding(const struct physical_ctx *ctx,
                 for (int i = 0; i < MFF_N_LOG_REGS; i++) {
                     put_load(0, MFF_REG0 + i, 0, 32, ofpacts_p);
                 }
-                put_resubmit(OFTABLE_LOG_EGRESS_PIPELINE, ofpacts_p);
+                put_resubmit(of_dp_groups_egress_table(), ofpacts_p);
 
                 /* allow traffic directed to external MAC address */
                 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
@@ -2642,7 +2643,7 @@ consider_port_binding(const struct physical_ctx *ctx,
             match_init_catchall(&match);
             match_set_reg(&match, MFF_LOG_INPORT - MFF_REG0,
                           binding->tunnel_key);
-            match_set_metadata(&match, htonll(binding->datapath->tunnel_key));
+            ovn_match_set_dp_key(&match, binding->datapath->tunnel_key);
             ofctrl_add_flow(flow_table, OFTABLE_REMOTE_OUTPUT, 150,
                             binding->header_.uuid.parts[0], &match,
                             ofpacts_p, &binding->header_.uuid);
@@ -3254,7 +3255,7 @@ physical_eval_remote_chassis_flows(const struct physical_ctx *ctx,
         put_load(1, MFF_LOG_FLAGS, MLF_RX_FROM_TUNNEL_BIT, 1,
                  &ingress_ofpacts);
         put_decapsulation(ctx->mff_ovn_geneve, tun, &ingress_ofpacts);
-        put_resubmit(OFTABLE_LOG_INGRESS_PIPELINE, &ingress_ofpacts);
+        put_resubmit(of_dp_groups_ingress_table(), &ingress_ofpacts);
         if (tun->type == VXLAN) {
             /* VXLAN doesn't carry the inport information, we cannot set
              * the outport to 0 then and match on it. */
@@ -3489,7 +3490,7 @@ physical_consider_evpn_binding(const struct evpn_binding *binding,
     put_load(binding->dp_key, MFF_LOG_DATAPATH, 0, 32, ofpacts);
     put_load(binding->binding_key, MFF_LOG_INPORT, 0, 32, ofpacts);
     put_resubmit(OFTABLE_LEARN_REMOTE_FDB, ofpacts);
-    put_resubmit(OFTABLE_LOG_INGRESS_PIPELINE, ofpacts);
+    put_resubmit(of_dp_groups_ingress_table(), ofpacts);
 
     ofctrl_add_flow(flow_table, OFTABLE_PHY_TO_LOG, 1050,
                     binding->flow_uuid.parts[0],
@@ -3540,7 +3541,7 @@ physical_consider_evpn_binding(const struct evpn_binding *binding,
     ofpbuf_clear(ofpacts);
     match_init_catchall(match);
 
-    match_set_metadata(match, htonll(binding->dp_key));
+    ovn_match_set_dp_key(match, binding->dp_key);
     match_set_reg(match, MFF_LOG_INPORT - MFF_REG0, binding->binding_key);
 
     /* This has to match the flow format installed by
@@ -3558,11 +3559,14 @@ physical_consider_evpn_binding(const struct evpn_binding *binding,
     ol_spec = ofpbuf_put_zeros(ofpacts, sizeof *ol_spec);
     ol_spec->dst.field = mf_from_id(MFF_METADATA);
     ol_spec->dst.ofs = 0;
-    ol_spec->dst.n_bits = ol_spec->dst.field->n_bits;
+    ol_spec->dst.n_bits = (of_dp_groups_enabled()
+                           ? OVN_DP_KEY_BITS
+                           : ol_spec->dst.field->n_bits);
     ol_spec->n_bits = ol_spec->dst.n_bits;
     ol_spec->dst_type = NX_LEARN_DST_MATCH;
     ol_spec->src_type = NX_LEARN_SRC_FIELD;
     ol_spec->src.field = mf_from_id(MFF_METADATA);
+    ol_spec->src.n_bits = ol_spec->n_bits;
 
     /* Match ETH_DST on ETH_SRC of the incoming packet. */
     ol_spec = ofpbuf_put_zeros(ofpacts, sizeof *ol_spec);
@@ -3684,7 +3688,7 @@ physical_consider_evpn_fdb(const struct evpn_fdb *fdb,
     ofpbuf_clear(ofpacts);
     match_init_catchall(match);
 
-    match_set_metadata(match, htonll(fdb->dp_key));
+    ovn_match_set_dp_key(match, fdb->dp_key);
     match_set_dl_dst(match, fdb->mac);
 
     if (vector_len(&fdb->paths) > 1) {
@@ -3741,7 +3745,7 @@ physical_consider_evpn_fdb(const struct evpn_fdb *fdb,
         ofpbuf_clear(ofpacts);
         match_init_catchall(match);
 
-        match_set_metadata(match, htonll(fdb->dp_key));
+        ovn_match_set_dp_key(match, fdb->dp_key);
         match_set_reg(match, MFF_LOG_INPORT - MFF_REG0, path.binding_key);
         match_set_dl_src(match, fdb->mac);
 
@@ -3766,7 +3770,7 @@ physical_consider_evpn_arp(const struct evpn_arp *arp,
     const struct local_datapath *ldp = arp->ldp;
 
     match_init_catchall(match);
-    match_set_metadata(match, htonll(ldp->datapath->tunnel_key));
+    ovn_match_set_dp_key(match, ldp->datapath->tunnel_key);
 
     if (IN6_IS_ADDR_V4MAPPED(ip)) {
         ovs_be32 ip4 = in6_addr_get_mapped_ipv4(ip);
@@ -4097,7 +4101,7 @@ physical_run(struct physical_ctx *p_ctx,
     struct match ct_look_def_match;
     match_init_catchall(&ct_look_def_match);
     ofpbuf_clear(&ofpacts);
-    put_resubmit(OFTABLE_LOG_INGRESS_PIPELINE, &ofpacts);
+    put_resubmit(of_dp_groups_ingress_table(), &ofpacts);
     ofctrl_add_flow(flow_table, OFTABLE_CT_ZONE_LOOKUP, 0, 0,
                     &ct_look_def_match, &ofpacts, hc_uuid);
 
@@ -4204,7 +4208,7 @@ physical_run(struct physical_ctx *p_ctx,
             /* For packets received from a ramp tunnel, set a flag to that
              * effect. */
             put_load(1, MFF_LOG_FLAGS, MLF_RCV_FROM_RAMP_BIT, 1, &ofpacts);
-            put_resubmit(OFTABLE_LOG_INGRESS_PIPELINE, &ofpacts);
+            put_resubmit(of_dp_groups_ingress_table(), &ofpacts);
 
             ofctrl_add_flow(flow_table, OFTABLE_PHY_TO_LOG, 110,
                             binding->header_.uuid.parts[0],
@@ -4319,9 +4323,17 @@ physical_run(struct physical_ctx *p_ctx,
     for (int i = 0; i < MFF_N_LOG_REGS; i++) {
         put_load(0, MFF_REG0 + i, 0, 32, &ofpacts);
     }
-    put_resubmit(OFTABLE_LOG_EGRESS_PIPELINE, &ofpacts);
+    put_resubmit(of_dp_groups_egress_table(), &ofpacts);
     ofctrl_add_flow(flow_table, OFTABLE_CHECK_LOOPBACK, 0, 0, &match,
                     &ofpacts, hc_uuid);
+
+    /* Tables 7 and 61, Priority 0.
+     * ============================
+     *
+     * With OpenFlow datapath groups, clear the datapath group bits of
+     * datapaths that don't belong to any group with an assigned bit before
+     * entering the logical ingress and egress pipelines. */
+    of_dp_groups_add_default_flows(flow_table, hc_uuid);
 
     /* Table 88, Priority 0.
      * =======================

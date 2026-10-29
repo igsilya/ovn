@@ -28,6 +28,8 @@ controller_ovn_controller_SOURCES = \
 	controller/lb.h \
 	controller/lflow.c \
 	controller/lflow.h \
+	controller/of-dp-groups.c \
+	controller/of-dp-groups.h \
 	controller/lflow-cache.c \
 	controller/lflow-cache.h \
 	controller/lport.c \
