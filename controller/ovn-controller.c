@@ -807,7 +807,7 @@ update_sb_db(struct ovsdb_idl *ovs_idl, struct ovsdb_idl *ovnsb_idl,
         if (of_dp_groups_set_enabled(
                 get_chassis_external_id_value_bool(
                     &cfg->external_ids, chassis_id,
-                    "ovn-openflow-dp-groups", false))) {
+                    "ovn-openflow-dp-groups", true))) {
             engine_set_force_recompute();
         }
         if (of_dp_groups_set_max_bits(
